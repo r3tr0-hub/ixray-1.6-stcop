@@ -744,7 +744,7 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 		const xr_string Tab = AiString(Params, "tab");
 		if (Tab == "level")
 		{
-			EContext.UI->ActiveTabIndex = 0;
+			EContext.UI->RequestedTabIndex = 0;
 		}
 		else if (Tab == "actor")
 		{
@@ -781,7 +781,7 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 		{
 			return Error("UNKNOWN_TAB", "Use a tab from scene_sdk_catalog");
 		}
-		return {{"ok", true}, {"requested_tab", Tab.c_str()}, {"active_tab", EContext.UI->ActiveTabIndex}};
+		return {{"ok", true}, {"requested_tab", Tab.c_str()}, {"status", "accepted"}, {"active_tab", EContext.UI->ActiveTabIndex}, {"pending_tab_index", EContext.UI->RequestedTabIndex}};
 	}
 	if (Method == "scene.sdk_run")
 	{

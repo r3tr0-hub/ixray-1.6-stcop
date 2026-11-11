@@ -337,6 +337,25 @@ private:
 				Check("stale_scene_rejected", !IsOk(Call("scene.transform", Request)) && HasPosition(1));
 				break;
 			}
+			case 12:
+			{
+				const Json Catalog = Call("scene.sdk_catalog", {{"query", "COMMAND_VALIDATE_SCENE"}});
+				Check("sdk_catalog_reads_native_registry", IsOk(Catalog) && Catalog.value("total", 0) > 0, Catalog);
+				const Json Assets = Call("scene.sdk_assets", {{"kind", "objects"}, {"query", "cube.object"}});
+				Check("sdk_catalog_finds_library_fixture", IsOk(Assets) && Assets.value("total", 0) > 0, Assets);
+				const Json Model = Call("scene.sdk_model", {{"reference", "ai_test\\cube.object"}});
+				Check("sdk_model_reads_surfaces", IsOk(Model) && Model.value("total", 0) > 0, Model);
+				const Json Id = Cube().value("id", Json());
+				const Json Properties = Call("scene.object_properties", {{"object_id", Id}});
+				Check("sdk_object_properties_reads_schema", IsOk(Properties) && Properties.value("total", 0) > 0, Properties);
+				const Json Rename = Call("scene.object_edit", {{"object_id", Id}, {"name", "ai_sdk_renamed"}}, true);
+				const Json Search = Call("scene.search", {{"name", "ai_sdk_renamed"}});
+				Check("sdk_object_rename_visible_in_search", IsOk(Rename) && IsOk(Search) && Search.value("objects", Json::array()).size() == 1, Rename);
+				Check("sdk_object_rename_undo", IsOk(Call("scene.undo", Json::object(), true)) && !String(Cube(), "id").empty());
+				const Json Unknown = Call("scene.sdk_run", {{"action", "COMMAND_EXIT"}}, true);
+				Check("sdk_action_rejects_unmapped_commands", !IsOk(Unknown), Unknown);
+				break;
+			}
 			default:
 			{
 				Complete();
