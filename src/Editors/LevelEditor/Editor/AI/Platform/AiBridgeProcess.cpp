@@ -14,105 +14,105 @@
 
 namespace AiBridgePlatform
 {
-	static constexpr size_t MaxMessageBytes = 32 * 1024 * 1024;
-	static constexpr size_t MaxQueuedBytes = 64 * 1024 * 1024;
-	static constexpr size_t MaxQueuedMessages = 256;
+static constexpr size_t MaxMessageBytes = 32 * 1024 * 1024;
+static constexpr size_t MaxQueuedBytes = 64 * 1024 * 1024;
+static constexpr size_t MaxQueuedMessages = 256;
 
-	class NativeHandle final
+class NativeHandle final
+{
+public:
+	NativeHandle() = default;
+	~NativeHandle() { Reset(); }
+	NativeHandle(const NativeHandle&) = delete;
+	NativeHandle& operator=(const NativeHandle&) = delete;
+
+	HANDLE Get() const { return Value; }
+	HANDLE* Put()
 	{
-	public:
-		NativeHandle() = default;
-		~NativeHandle() { Reset(); }
-		NativeHandle(const NativeHandle&) = delete;
-		NativeHandle& operator=(const NativeHandle&) = delete;
-
-		HANDLE Get() const { return Value; }
-		HANDLE* Put()
-		{
-			Reset();
-			return &Value;
-		}
-		void Reset(HANDLE NewValue = nullptr)
-		{
-			if (Value != nullptr && Value != INVALID_HANDLE_VALUE)
-			{
-				CloseHandle(Value);
-			}
-			Value = NewValue;
-		}
-
-	private:
-		HANDLE Value = nullptr;
-	};
-
-	class ProcessAttributes final
+		Reset();
+		return &Value;
+	}
+	void Reset(HANDLE NewValue = nullptr)
 	{
-	public:
-		ProcessAttributes() = default;
-		~ProcessAttributes()
+		if (Value != nullptr && Value != INVALID_HANDLE_VALUE)
 		{
-			if (Value != nullptr)
-			{
-				DeleteProcThreadAttributeList(Value);
-			}
-			xr_free(Storage);
+			CloseHandle(Value);
 		}
-		bool Initialize(HANDLE* Handles, size_t Count)
-		{
-			SIZE_T Size = 0;
-			InitializeProcThreadAttributeList(nullptr, 1, 0, &Size);
-			if (Size == 0)
-			{
-				return false;
-			}
-			Storage = xr_alloc<u8>(Size);
-			Value = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(Storage);
-			if (!InitializeProcThreadAttributeList(Value, 1, 0, &Size))
-			{
-				Value = nullptr;
-				return false;
-			}
-			return UpdateProcThreadAttribute(Value, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, Handles, Count * sizeof(HANDLE), nullptr, nullptr) != FALSE;
-		}
-		LPPROC_THREAD_ATTRIBUTE_LIST Get() const { return Value; }
-
-	private:
-		u8* Storage = nullptr;
-		LPPROC_THREAD_ATTRIBUTE_LIST Value = nullptr;
-	};
-
-	static std::wstring QuoteArgument(const std::wstring& Argument)
-	{
-		std::wstring Result = L"\"";
-		size_t Slashes = 0;
-		for (wchar_t Character : Argument)
-		{
-			if (Character == L'\\')
-			{
-				++Slashes;
-				continue;
-			}
-			if (Character == L'"')
-			{
-				Result.append(Slashes * 2 + 1, L'\\');
-			}
-			else
-			{
-				Result.append(Slashes, L'\\');
-			}
-			Slashes = 0;
-			Result.push_back(Character);
-		}
-		Result.append(Slashes * 2, L'\\');
-		Result.push_back(L'"');
-		return Result;
+		Value = NewValue;
 	}
 
-	static nlohmann::json ErrorEvent(const char* Code, const char* Message)
+private:
+	HANDLE Value = nullptr;
+};
+
+class ProcessAttributes final
+{
+public:
+	ProcessAttributes() = default;
+	~ProcessAttributes()
 	{
-		return {{"type", "ui.event"}, {"event", "error"}, {"params", {{"code", Code}, {"message", Message}}}};
+		if (Value != nullptr)
+		{
+			DeleteProcThreadAttributeList(Value);
+		}
+		xr_free(Storage);
 	}
+	bool Initialize(HANDLE* Handles, size_t Count)
+	{
+		SIZE_T Size = 0;
+		InitializeProcThreadAttributeList(nullptr, 1, 0, &Size);
+		if (Size == 0)
+		{
+			return false;
+		}
+		Storage = xr_alloc<u8>(Size);
+		Value = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(Storage);
+		if (!InitializeProcThreadAttributeList(Value, 1, 0, &Size))
+		{
+			Value = nullptr;
+			return false;
+		}
+		return UpdateProcThreadAttribute(Value, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, Handles, Count * sizeof(HANDLE), nullptr, nullptr) != FALSE;
+	}
+	LPPROC_THREAD_ATTRIBUTE_LIST Get() const { return Value; }
+
+private:
+	u8* Storage = nullptr;
+	LPPROC_THREAD_ATTRIBUTE_LIST Value = nullptr;
+};
+
+static std::wstring QuoteArgument(const std::wstring& Argument)
+{
+	std::wstring Result = L"\"";
+	size_t Slashes = 0;
+	for (wchar_t Character : Argument)
+	{
+		if (Character == L'\\')
+		{
+			++Slashes;
+			continue;
+		}
+		if (Character == L'"')
+		{
+			Result.append(Slashes * 2 + 1, L'\\');
+		}
+		else
+		{
+			Result.append(Slashes, L'\\');
+		}
+		Slashes = 0;
+		Result.push_back(Character);
+	}
+	Result.append(Slashes * 2, L'\\');
+	Result.push_back(L'"');
+	return Result;
 }
+
+static nlohmann::json ErrorEvent(const char* Code, const char* Message)
+{
+	return {{"type", "ui.event"}, {"event", "error"}, {"params", {{"code", Code}, {"message", Message}}}};
+}
+} // namespace AiBridgePlatform
 
 class AiBridgeProcessImpl final
 {
@@ -182,11 +182,10 @@ public:
 		Startup.StartupInfo.hStdError = ChildError.Get();
 		Startup.lpAttributeList = Attributes.Get();
 		std::wstring CommandLine = AiBridgePlatform::QuoteArgument(NodePath.native()) + L" " + AiBridgePlatform::QuoteArgument(BridgePath.native()) +
-			L" --sdk-root " + AiBridgePlatform::QuoteArgument(SdkRoot.native()) +
-			L" --runtime-root " + AiBridgePlatform::QuoteArgument((ToolsRoot / L"runtime").native());
+								   L" --sdk-root " + AiBridgePlatform::QuoteArgument(SdkRoot.native()) +
+								   L" --runtime-root " + AiBridgePlatform::QuoteArgument((ToolsRoot / L"runtime").native());
 		PROCESS_INFORMATION ProcessInfo = {};
-		if (!CreateProcessW(NodePath.c_str(), CommandLine.data(), nullptr, nullptr, TRUE,
-			CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, nullptr, SdkRoot.c_str(), &Startup.StartupInfo, &ProcessInfo))
+		if (!CreateProcessW(NodePath.c_str(), CommandLine.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, nullptr, SdkRoot.c_str(), &Startup.StartupInfo, &ProcessInfo))
 		{
 			Error = "Unable to start bundled AI runtime";
 			Stop();

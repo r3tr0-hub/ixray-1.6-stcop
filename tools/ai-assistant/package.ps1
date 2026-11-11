@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$Output = '',
     [string]$BinaryDirectory = '',
@@ -13,6 +13,9 @@ if (-not $BinaryDirectory) { $BinaryDirectory = Join-Path $Root 'build/x64/Edito
 $Stage = Join-Path $Output 'IXRay-AI-Assistant'
 $Downloads = Join-Path $Output 'downloads'
 New-Item -ItemType Directory -Force -Path $Output,$Downloads | Out-Null
+function Write-Utf8Json($Value, $File, [int]$Depth = 5) {
+    [IO.File]::WriteAllText($File, ($Value | ConvertTo-Json -Depth $Depth), [Text.UTF8Encoding]::new($false))
+}
 if (Test-Path $Stage) { Remove-Item $Stage -Recurse -Force }
 New-Item -ItemType Directory -Path $Stage | Out-Null
 function Get-VerifiedArchive($Spec, $Name) {
@@ -36,9 +39,14 @@ foreach ($Directory in @('gamedata','rawdata')) {
 Get-ChildItem $Root -File | Where-Object { $_.Name -like 'fs*.ltx' -or $_.Name -in 'ActorEditorLevel.cform','LICENSE.md' } | Copy-Item -Destination $Stage
 $Assistant = Join-Path $Stage 'tools/ai-assistant'
 New-Item -ItemType Directory -Force $Assistant | Out-Null
-foreach ($Name in @('src','package.json','package-lock.json','runtime-lock.json','codex-download.json','README_RU.txt','TEST_REPORT_RU.txt')) {
+foreach ($Name in @('src','package.json','package-lock.json','runtime-lock.json','codex-download.json','README_RU.txt','TEST_REPORT_RU.txt','CI_EVIDENCE.json','licenses')) {
     $Source = Join-Path $PSScriptRoot $Name
     if (Test-Path $Source) { Copy-Item $Source (Join-Path $Assistant $Name) -Recurse }
+}
+$FixtureInstructions = Join-Path $PSScriptRoot 'fixtures/README_RU.txt'
+if (Test-Path $FixtureInstructions) {
+    New-Item -ItemType Directory -Force (Join-Path $Assistant 'fixtures') | Out-Null
+    Copy-Item $FixtureInstructions (Join-Path $Assistant 'fixtures/README_RU.txt')
 }
 $Runtime = Join-Path $Assistant 'runtime'
 New-Item -ItemType Directory -Force $Runtime | Out-Null
@@ -70,7 +78,16 @@ New-Item -ItemType Directory -Force $CodexDir | Out-Null
 # Keep the official archive layout; helper binaries and resources must remain adjacent.
 Copy-Item (Join-Path $CodexExtract '*') $CodexDir -Recurse -Force
 $CodexFile = Get-ChildItem $CodexDir -File -Filter 'codex-*-windows-msvc.exe' | Select-Object -First 1
-if ($CodexFile) { Move-Item $CodexFile.FullName (Join-Path $CodexDir 'codex.exe') -Force }
+if ($CodexFile) {
+    Move-Item $CodexFile.FullName (Join-Path $CodexDir 'codex.exe') -Force
+    $CodexPackagePath = Join-Path $CodexDir 'codex-package.json'
+    if (Test-Path $CodexPackagePath) {
+        $CodexPackage = Get-Content $CodexPackagePath -Raw | ConvertFrom-Json
+        if ($CodexPackage.version -ne $Lock.codex.version -or $CodexPackage.target -ne 'x86_64-pc-windows-msvc') { throw 'Unexpected official Codex package metadata.' }
+        $CodexPackage.entrypoint = 'codex.exe'
+        Write-Utf8Json $CodexPackage $CodexPackagePath
+    }
+}
 if (-not (Test-Path (Join-Path $CodexDir 'codex.exe'))) { throw 'Official archive did not contain expected codex executable.' }
 $CodexVersion = & (Join-Path $CodexDir 'codex.exe') --version
 if ($LASTEXITCODE) { throw 'Official Codex binary launch failed.' }
@@ -81,22 +98,31 @@ if (Test-Path $Smoke) {
     if ($LASTEXITCODE) { throw 'Official app-server protocol smoke failed.' }
 }
 # App-local MSVC runtime removes the need for a developer toolchain or global install.
+$CrtFound = $false
 $VsWhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
 if (Test-Path $VsWhere) {
     $VS = & $VsWhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-    $CrtVersion = Get-ChildItem (Join-Path $VS 'VC/Redist/MSVC') -Directory | Sort-Object Name -Descending | Select-Object -First 1
-    $CRT = Join-Path $CrtVersion.FullName 'x64/Microsoft.VC143.CRT'
-    if (Test-Path $CRT) { Copy-Item (Join-Path $CRT '*.dll') (Join-Path $Stage 'bin') }
+    if ($VS) {
+        $CrtVersion = Get-ChildItem (Join-Path $VS 'VC/Redist/MSVC') -Directory | Sort-Object Name -Descending | Select-Object -First 1
+        if ($CrtVersion) {
+            $CRT = Join-Path $CrtVersion.FullName 'x64/Microsoft.VC143.CRT'
+            if (Test-Path $CRT) {
+                Copy-Item (Join-Path $CRT '*.dll') (Join-Path $Stage 'bin')
+                $CrtFound = (Test-Path (Join-Path $Stage 'bin/vcruntime140.dll')) -and (Test-Path (Join-Path $Stage 'bin/msvcp140.dll'))
+            }
+        }
+    }
 }
+if (-not $CrtFound) { throw 'App-local Microsoft VC143 x64 runtime is missing; install the Visual Studio 2022 C++ redist build component before packaging.' }
 foreach ($Name in @('Launch-LevelEditor.cmd','Rollback.cmd','Rollback.ps1')) {
     Copy-Item (Join-Path $PSScriptRoot $Name) $Stage
 }
 $Commit = (& git -C $Root rev-parse HEAD).Trim()
-@{ product='IXRay-AI-Assistant'; compatibilityLine='develop'; version=$Lock.version; upstream=$Lock.upstreamCommit; commit=$Commit; configuration='Release'; platform='Windows x64'; builtAt=[DateTime]::UtcNow.ToString('o'); node=$Lock.node.version; codex=$Lock.codex.version } | ConvertTo-Json | Set-Content (Join-Path $Stage 'build-info.json') -Encoding utf8
+Write-Utf8Json @{ product='IXRay-AI-Assistant'; compatibilityLine='develop'; version=$Lock.version; upstream=$Lock.upstreamCommit; commit=$Commit; configuration='Release'; platform='Windows x64'; builtAt=[DateTime]::UtcNow.ToString('o'); node=$Lock.node.version; codex=$Lock.codex.version } (Join-Path $Stage 'build-info.json')
 $Manifest = foreach ($File in Get-ChildItem $Stage -Recurse -File) {
     @{ path=$File.FullName.Substring($Stage.TrimEnd([IO.Path]::DirectorySeparatorChar).Length + 1).Replace('\','/'); sha256=(Get-FileHash $File.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
 }
-$Manifest | ConvertTo-Json -Depth 3 | Set-Content (Join-Path $Stage 'SHA256SUMS.json') -Encoding utf8
+Write-Utf8Json @($Manifest) (Join-Path $Stage 'SHA256SUMS.json')
 Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath (Join-Path $Output 'IXRay-AI-Assistant-0.1.0-Windows-x64-Portable.zip') -Force
 if (-not $SkipInstaller) {
     $ISCC = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe'

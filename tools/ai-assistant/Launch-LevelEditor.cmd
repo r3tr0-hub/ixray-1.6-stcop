@@ -1,3 +1,3 @@
 @echo off
 cd /d "%~dp0"
-start "IX-Ray Level Editor" "%~dp0bin\LevelEditor.exe" -fsltx "%~dp0fs.ltx"
+start "IX-Ray Level Editor" "%~dp0bin\LevelEditor.exe" -fsltx fs.ltx

@@ -657,7 +657,6 @@ void UIMainMenuForm::Draw()
 				UIAiAssistant::Show();
 			}
 
-
 			if (ImGui::MenuItemI("Macro Editor", ICON_FA_SQUARE_SHARE_NODES, ""))
 			{
 				UINodesEditorForm::Activate(ENodesMode::Macros);

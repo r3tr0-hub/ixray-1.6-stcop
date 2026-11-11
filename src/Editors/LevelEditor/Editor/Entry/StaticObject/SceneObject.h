@@ -38,6 +38,7 @@ private:
 		xr_string Texture;
 		xr_string VMap;
 		u32 SurfaceIndex = u32(-1);
+		bool UsesShared = false;
 	};
 	xr_vector<SSurfaceOverride> PendingSurfaces;
 	// The record is loaded but the library object is streamed out

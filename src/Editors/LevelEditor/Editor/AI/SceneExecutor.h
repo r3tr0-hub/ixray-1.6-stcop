@@ -10,6 +10,7 @@ public:
 	AiSceneExecutor();
 	~AiSceneExecutor() = default;
 	nlohmann::json Execute(const xr_string& Method, const nlohmann::json& Params);
+	nlohmann::json CancelOperation(const xr_string& Method, const nlohmann::json& Params);
 	void Invalidate();
 
 private:

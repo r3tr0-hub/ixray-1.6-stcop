@@ -21,6 +21,11 @@ static xr_string AiString(const nlohmann::json& Value, const char* Key, const ch
 	return Iter->get_ref<const nlohmann::json::string_t&>().c_str();
 }
 
+static bool AiChangesEditor(const xr_string& Method)
+{
+	return Method == "scene.select" || Method == "scene.focus" || Method == "scene.transform" || Method == "scene.duplicate" || Method == "scene.place" || Method == "scene.undo" || Method == "scene.redo" || Method == "scene.material_set" || Method == "scene.save_copy";
+}
+
 static void AiRemovePrivateData(nlohmann::json& Data)
 {
 	if (Data.is_object())
@@ -247,6 +252,13 @@ void UIAiAssistant::Start()
 {
 	xr_string Error;
 	HasStarted = true;
+	for (const auto& Data : EditorRequests)
+	{
+		Executor.CancelOperation(AiString(Data, "method"), Data.value("params", nlohmann::json::object()));
+	}
+	EditorRequests.clear();
+	CancelledRequests.clear();
+	Pending.clear();
 	if (!Process.Start(Error))
 	{
 		ServerStatus = "Ошибка запуска";
@@ -254,6 +266,7 @@ void UIAiAssistant::Start()
 		return;
 	}
 	ServerStatus = "Запуск…";
+	IsRejectingCommands = false;
 	Request("connection.check");
 	Request("auth.status");
 	Request("models.list");
@@ -292,19 +305,60 @@ void UIAiAssistant::Request(const char* Method, const nlohmann::json& Params)
 void UIAiAssistant::Update()
 {
 	nlohmann::json Data;
-	for (u32 Count = 0; Count < 8 && Process.Poll(Data); ++Count)
+	// Drain control messages before executing any queued scene operation. A cancel
+	// following a request in the same channel therefore wins before that frame.
+	for (u32 Count = 0; Count < 256 && Process.Poll(Data); ++Count)
 	{
-		if (AiString(Data, "type") == "editor.request")
+		const xr_string Type = AiString(Data, "type");
+		if (Type == "editor.request")
 		{
-			const xr_string Method = AiString(Data, "method");
-			const nlohmann::json Params = Data.contains("params") && Data["params"].is_object() ? Data["params"] : nlohmann::json::object();
-			nlohmann::json Result = Executor.Execute(Method, Params);
-			Process.Send({{"type", "editor.response"}, {"id", Data.value("id", nlohmann::json())}, {"result", std::move(Result)}});
+			if (EditorRequests.size() >= 256)
+			{
+				const xr_string Method = AiString(Data, "method");
+				const nlohmann::json Params = Data.contains("params") && Data["params"].is_object() ? Data["params"] : nlohmann::json::object();
+				Process.Send({{"type", "editor.response"}, {"id", Data.value("id", nlohmann::json())}, {"result", Executor.CancelOperation(Method, Params)}});
+			}
+			else
+			{
+				EditorRequests.push_back(std::move(Data));
+			}
+		}
+		else if (Type == "editor.cancel")
+		{
+			if (Data.contains("ids") && Data["ids"].is_array())
+			{
+				for (const auto& Id : Data["ids"])
+				{
+					if (Id.is_string() && Id.get_ref<const nlohmann::json::string_t&>().size() < 200 && CancelledRequests.size() < 4096)
+					{
+						CancelledRequests.insert(Id.get_ref<const nlohmann::json::string_t&>().c_str());
+					}
+				}
+			}
 		}
 		else
 		{
 			Receive(Data);
 		}
+	}
+	for (u32 Count = 0; Count < 4 && !EditorRequests.empty(); ++Count)
+	{
+		Data = std::move(EditorRequests.front());
+		EditorRequests.pop_front();
+		const xr_string Id = AiString(Data, "id");
+		const xr_string Method = AiString(Data, "method");
+		const nlohmann::json Params = Data.contains("params") && Data["params"].is_object() ? Data["params"] : nlohmann::json::object();
+		nlohmann::json Result;
+		const bool IsCancelled = CancelledRequests.erase(Id) != 0;
+		if ((IsRejectingCommands && AiChangesEditor(Method)) || !Process.IsRunning() || IsCancelled)
+		{
+			Result = Executor.CancelOperation(Method, Params);
+		}
+		else
+		{
+			Result = Executor.Execute(Method, Params);
+		}
+		Process.Send({{"type", "editor.response"}, {"id", Data.value("id", nlohmann::json())}, {"result", std::move(Result)}});
 	}
 	if (AiNowMs() >= NextStatusTime)
 	{
@@ -402,7 +456,11 @@ void UIAiAssistant::Receive(const nlohmann::json& Data)
 	else if (Event == "chat.state")
 	{
 		const xr_string State = AiString(Params, "state");
-		IsRunningTurn = State == "running";
+		IsRunningTurn = State == "running" || State == "starting" || State == "canceling";
+		if (State == "canceling" || State == "failed")
+		{
+			IsRejectingCommands = true;
+		}
 		if (State == "interrupted")
 		{
 			AddMessage("Система", "Запрос остановлен. Уже выполненные изменения можно отменить штатным Undo.");
@@ -411,6 +469,24 @@ void UIAiAssistant::Receive(const nlohmann::json& Data)
 	else if (Event == "auth.status")
 	{
 		AuthStatus = Params.contains("account") && !Params["account"].is_null() ? "Выполнен вход через ChatGPT" : "Не выполнен вход";
+	}
+	else if (Event == "chat.history")
+	{
+		if (Params.contains("messages") && Params["messages"].is_array())
+		{
+			Messages.clear();
+			for (const auto& Entry : Params["messages"])
+			{
+				AddMessage(AiString(Entry, "role") == "user" ? "Вы" : "Ассистент", AiString(Entry, "text"));
+			}
+		}
+	}
+	else if (Event == "confirmation.dismissed")
+	{
+		if (AiString(Params, "id") == AiString(Confirmation, "id"))
+		{
+			Confirmation = nlohmann::json::object();
+		}
 	}
 	else if (Event == "models")
 	{
@@ -438,7 +514,7 @@ void UIAiAssistant::Receive(const nlohmann::json& Data)
 static bool AiButton(const char* Label)
 {
 	const float Width = ImGui::CalcTextSize(Label).x + ImGui::GetStyle().FramePadding.x * 2;
-	if (ImGui::GetCursorPosX() + Width > ImGui::GetWindowContentRegionMax().x && ImGui::GetCursorPosX() > ImGui::GetWindowContentRegionMin().x + 1)
+	if (Width > ImGui::GetContentRegionAvail().x && ImGui::GetCursorPosX() > ImGui::GetStyle().WindowPadding.x + 1)
 	{
 		ImGui::NewLine();
 	}
@@ -459,6 +535,7 @@ void UIAiAssistant::DrawButtons()
 	}
 	if (AiButton("Выйти"))
 	{
+		IsRejectingCommands = true;
 		Request("auth.logout");
 	}
 	if (AiButton("Проверить подключение"))
@@ -574,6 +651,7 @@ void UIAiAssistant::Render()
 	if (AiButton("Отправить"))
 	{
 		AddMessage("Вы", Input);
+		IsRejectingCommands = false;
 		Request("chat.send", {{"text", Input}, {"model", SelectedModel.empty() ? nlohmann::json() : nlohmann::json(SelectedModel.c_str())}});
 		IsRunningTurn = true;
 		Input[0] = 0;
@@ -582,6 +660,7 @@ void UIAiAssistant::Render()
 	ImGui::BeginDisabled(!IsRunningTurn);
 	if (AiButton("Остановить"))
 	{
+		IsRejectingCommands = true;
 		Request("chat.cancel");
 	}
 	ImGui::EndDisabled();
@@ -603,9 +682,14 @@ void UIAiAssistant::Render()
 	}
 	if (ImGui::BeginPopupModal("Подтвердить изменение###AiConfirm", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
 	{
+		if (Confirmation.empty())
+		{
+			ImGui::CloseCurrentPopup();
+		}
 		ImGui::TextWrapped("%s", AiString(Confirmation, "title", "Подтвердите пакет изменений").c_str());
 		ImGui::PushTextWrapPos(ImGui::GetFontSize() * 45);
-		ImGui::TextUnformatted(AiDisplayData(Confirmation).c_str());
+		const xr_string Details = AiString(Confirmation, "details");
+		ImGui::TextUnformatted(Details.empty() ? AiDisplayData(Confirmation).c_str() : Details.c_str());
 		ImGui::PopTextWrapPos();
 		if (ImGui::Button("Подтвердить"))
 		{

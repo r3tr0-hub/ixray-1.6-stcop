@@ -47,10 +47,11 @@ export class Bridge {
     this.workspace = join(this.profileRoot, 'workspace');
     this.threadPath = join(this.profileRoot, 'current-thread.json');
     this.editor = new EditorChannel({ write: this.write, timeoutMs: editorTimeoutMs });
-    this.local = new LocalEditorServer(this.editor, { beforeRequest: (method, params) => this.authorizeBatch(method, params) });
+    this.local = new LocalEditorServer(this.editor, { beforeRequest: (method, params, options) => this.authorizeBatch(method, params, options) });
     this.account = null; this.models = []; this.threadId = null; this.turnId = null; this.state = 'idle'; this.starting = null;
     this.errorCodes = []; this.operations = []; this.client = null; this.editorStatus = null;
     this.approvals = new Map(); this.cancelGeneration = 0; this.loadedThreadId = null;
+    this.historyLoadedThreadId = null;
     this.local.on('clients', count => { this.mcpClients = count; this.event('status', this.status()); });
     this.local.on('operation', operation => {
       this.operations.push({ at: new Date().toISOString(), ...operation });
@@ -107,6 +108,10 @@ export class Bridge {
         mcpEnv: { IXRAY_EDITOR_PIPE: this.local.path, IXRAY_EDITOR_TOKEN: this.local.token }
       });
       this.client = client; this.local.resume();
+      if (this.threadId) {
+        try { await this.restoreHistory(client); }
+        catch (error) { this.report(codedError('HISTORY_READ_FAILED', `История диалога не загружена: ${error.message}`)); }
+      }
       this.event('status', this.status());
       return client;
     })();
@@ -132,6 +137,28 @@ export class Bridge {
     } while (cursor);
     this.models = models; this.event('models', { models });
     return { models, defaultModel: models.find(model => model.isDefault)?.model ?? models[0]?.model ?? null };
+  }
+
+  async restoreHistory(client = this.client) {
+    if (!this.threadId) { this.event('chat.history', { threadId: null, messages: [] }); return { messages: [] }; }
+    if (this.historyLoadedThreadId === this.threadId) return { alreadyLoaded: true };
+    const items = []; let cursor;
+    do {
+      const page = await client.request('thread/items/list', { threadId: this.threadId, limit: 100, sortDirection: 'desc', ...(cursor ? { cursor } : {}) });
+      items.push(...(page.data ?? [])); cursor = page.nextCursor;
+    } while (cursor && items.length < 500);
+    const messages = items.reverse().flatMap(entry => {
+      const item = entry.item ?? entry;
+      if (item.type === 'agentMessage' && typeof item.text === 'string') return [{ role: 'assistant', text: item.text, itemId: item.id }];
+      if (item.type === 'userMessage' && Array.isArray(item.content)) {
+        const text = item.content.filter(content => content.type === 'text' && typeof content.text === 'string').map(content => content.text).join('\n');
+        return text ? [{ role: 'user', text, itemId: item.id }] : [];
+      }
+      return [];
+    });
+    this.historyLoadedThreadId = this.threadId;
+    this.event('chat.history', { threadId: this.threadId, messages, truncated: Boolean(cursor) });
+    return { messages, truncated: Boolean(cursor) };
   }
 
   async ensureThread(model) {
@@ -183,6 +210,7 @@ export class Bridge {
   async cancelChat() {
     this.cancelGeneration++;
     this.local.cancel();
+    this.editor.cancelPending('Остановка запрошена; результат уже отправленных операций уточняется через scene.operation_status.');
     for (const approval of this.approvals.values()) { clearTimeout(approval.timer); approval.reject(codedError('CANCELED', 'Подтверждение отменено.', 'canceled')); }
     this.approvals.clear();
     if (!['running', 'starting', 'canceling'].includes(this.state)) return { state: this.state, message: 'Активного запроса нет.' };
@@ -213,21 +241,34 @@ export class Bridge {
     }
   }
 
-  async authorizeBatch(method, params = {}) {
+  async authorizeBatch(method, params = {}, { signal } = {}) {
+    if (signal?.aborted) throw codedError('CANCELED', 'Запрос отменён до подготовки пакета.', 'not_sent');
     if (!['scene.transform', 'scene.duplicate', 'scene.material_set'].includes(method)) return;
     let ids = method === 'scene.material_set' ? params.changes?.map(change => `${change.object_id}:surface:${change.surface_index}`) : params.ids;
     if (!ids) {
-      const selection = await this.editor.request('scene.selection', { scene_session: params.scene_session, offset: 0, limit: 500 });
-      if (selection?.ok === false) throw codedError(selection.error?.code ?? 'EDITOR_ERROR', selection.error?.message ?? 'Выделение недоступно.');
-      ids = (selection.objects ?? selection.items ?? selection.selected ?? []).map(item => typeof item === 'string' ? item : item.id ?? item.object_id);
-      const total = selection.total ?? selection.total_count ?? ids.length;
-      if (total > ids.length) ids.push(`Ещё ${total - ids.length} объектов: перечень ограничен страницей.`);
+      const status = await this.editor.request('scene.status', { scene_session: params.scene_session }, { signal });
+      if (status?.ok === false) throw codedError(status.error?.code ?? 'EDITOR_ERROR', status.error?.message ?? 'Сцена недоступна.');
+      if (status.selected_count <= 100) return;
+      if (status.selected_count > 128) throw codedError('BATCH_LIMIT', 'В одном изменении допускается до 128 объектов. Укажите конкретный меньший набор.', 'not_sent');
+      ids = []; let offset = 0;
+      for (;;) {
+        const selection = await this.editor.request('scene.selection', { scene_session: params.scene_session, offset, limit: 500 }, { signal });
+        if (selection?.ok === false) throw codedError(selection.error?.code ?? 'EDITOR_ERROR', selection.error?.message ?? 'Выделение недоступно.');
+        ids.push(...(selection.objects ?? []).map(item => item.id));
+        if (!selection.has_more) break;
+        if (!Number.isSafeInteger(selection.next_offset) || selection.next_offset <= offset) throw codedError('INVALID_PAGE_CURSOR', 'Не удалось получить точный список выделения.', 'not_sent');
+        offset = selection.next_offset;
+      }
+      if (ids.length !== status.selected_count) throw codedError('SELECTION_CHANGED', 'Выделение изменилось во время подготовки пакета. Прочитайте сцену заново.', 'not_sent');
     }
     if (!Array.isArray(ids) || ids.length <= 100) return;
     const id = randomUUID();
     await new Promise((resolveApproval, reject) => {
-      const timer = setTimeout(() => { this.approvals.delete(id); reject(codedError('CONFIRMATION_TIMEOUT', 'Подтверждение пакета не получено. Изменения не отправлены.', 'not_sent')); }, 5 * 60 * 1000);
-      this.approvals.set(id, { resolve: resolveApproval, reject, timer });
+      const abort = () => { this.approvals.delete(id); cleanup(); this.event('confirmation.dismissed', { id }); reject(codedError('CANCELED', 'Подготовка пакета отменена до отправки.', 'not_sent')); };
+      const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); };
+      const timer = setTimeout(() => { this.approvals.delete(id); cleanup(); this.event('confirmation.dismissed', { id }); reject(codedError('CONFIRMATION_TIMEOUT', 'Подтверждение пакета не получено. Изменения не отправлены.', 'not_sent')); }, 5 * 60 * 1000);
+      this.approvals.set(id, { resolve: () => { cleanup(); resolveApproval(); }, reject: error => { cleanup(); reject(error); }, timer });
+      signal?.addEventListener('abort', abort, { once: true });
       this.event('confirmation.requested', { id, title: `Подтвердить ${method}: ${ids.length} элементов`, details: JSON.stringify({ method, op_id: params.op_id, objects: ids, changes: method === 'scene.material_set' ? params.changes : { translation_m: params.translation_m, rotation_degrees: params.rotation_degrees, scale_factor: params.scale_factor } }, null, 2) });
     });
   }
@@ -280,9 +321,10 @@ export class Bridge {
       case 'models.list': return this.listModels();
       case 'chat.send': return this.sendChat(params);
       case 'chat.cancel': return this.cancelChat();
+      case 'chat.history': { const client = await this.ensureClient(); this.historyLoadedThreadId = null; return this.restoreHistory(client); }
       case 'chat.new': {
         if (['running', 'starting', 'canceling'].includes(this.state)) throw codedError('TURN_ACTIVE', 'Сначала остановите текущий запрос.');
-        this.threadId = null; this.loadedThreadId = null; this.turnId = null; this.state = 'idle';
+        this.threadId = null; this.loadedThreadId = null; this.historyLoadedThreadId = null; this.turnId = null; this.state = 'idle';
         await saveJsonAtomic(this.threadPath, { version: 1, threadId: null });
         this.event('chat.new', {}); this.event('chat.state', { state: this.state }); return { ok: true };
       }

@@ -120,7 +120,7 @@ export class AppServerClient extends EventEmitter {
       'enabled = true',
       'required = true',
       'startup_timeout_sec = 20',
-      'tool_timeout_sec = 120',
+      'tool_timeout_sec = 600',
       '',
     ].join('\n');
     const temporary = `${configPath}.${process.pid}.tmp`;

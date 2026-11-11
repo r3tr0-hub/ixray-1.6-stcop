@@ -10,6 +10,7 @@
 #define SCENEOBJ_CHUNK_FLAGS			0x0905
 #define SCENEOBJ_CHUNK_SURFACE			0x0906
 #define SCENEOBJ_CHUNK_SURFACE_INDICES	0x0907
+#define SCENEOBJ_CHUNK_SURFACE_MODES	0x0908
 
 bool CSceneObject::ResolveReference(const char* Name)
 {
@@ -75,6 +76,12 @@ void CSceneObject::ApplySurfaceOverrides()
             continue;
         }
 
+        if (Override.UsesShared && Surf->UseShared && Surf->m_pData.second->m_Name == Override.Name.c_str())
+        {
+            // Unchanged shared surfaces retain live library sharing across reloads.
+            Surf->m_VMap = Override.VMap.c_str();
+            continue;
+        }
         if (!Surf->IsVoid())
         {
             Surf->OnDeviceDestroy();
@@ -110,7 +117,7 @@ void CSceneObject::CaptureSurfaceOverrides(xr_vector<SSurfaceOverride>& Dest) co
     for (size_t Index = 0; Index < m_Surfaces.size(); ++Index)
     {
         const CSurface* Surf = m_Surfaces[Index];
-        Dest.push_back({ Surf->_Name(), Surf->_ShaderName(), Surf->_ShaderXRLCName(), Surf->_GameMtlName(), Surf->_Texture(), Surf->m_VMap.c_str(), u32(Index) });
+        Dest.push_back({ Surf->_Name(), Surf->_ShaderName(), Surf->_ShaderXRLCName(), Surf->_GameMtlName(), Surf->_Texture(), Surf->m_VMap.c_str(), u32(Index), Surf->UseShared });
     }
 }
 
@@ -247,6 +254,11 @@ bool CSceneObject::LoadLTX(CInifile& ini, const char* sect_name)
                 {
                     Override.SurfaceIndex = ini.r_u32(sect_name, IndexKey);
                 }
+                xr_sprintf(IndexKey, "surface_override_shared_%u", i);
+                if (ini.line_exist(sect_name, IndexKey))
+                {
+                    Override.UsesShared = ini.r_u8(sect_name, IndexKey) != 0;
+                }
             }
         }
     }
@@ -284,6 +296,8 @@ void CSceneObject::SaveLTX(CInifile& ini, const char* sect_name)
             string64 IndexKey;
             xr_sprintf(IndexKey, "surface_override_index_%u", u32(Index));
             ini.w_u32(sect_name, IndexKey, Surf.SurfaceIndex);
+            xr_sprintf(IndexKey, "surface_override_shared_%u", u32(Index));
+            ini.w_u8(sect_name, IndexKey, Surf.UsesShared ? 1 : 0);
             ini_stream.w_stringZ(Surf.Name.c_str());
             ini_stream.w_stringZ(Surf.Shader.c_str());
             ini_stream.w_stringZ(Surf.ShaderXRLC.c_str());
@@ -355,6 +369,18 @@ bool CSceneObject::LoadStream(IReader& F)
                 }
             }
         }
+        const u32 ModeChunkSize = F.find_chunk(SCENEOBJ_CHUNK_SURFACE_MODES);
+        if (ModeChunkSize >= sizeof(u32))
+        {
+            const u32 Count = F.r_u32();
+            if (Count == PendingSurfaces.size() && u64(ModeChunkSize) >= sizeof(u32) + u64(Count))
+            {
+                for (SSurfaceOverride& Override : PendingSurfaces)
+                {
+                    Override.UsesShared = F.r_u8() != 0;
+                }
+            }
+        }
     }
     return LoadReference();
 }
@@ -401,6 +427,14 @@ void CSceneObject::SaveStream(IWriter& F)
         for (const SSurfaceOverride& Surf : Surfaces)
         {
             F.w_u32(Surf.SurfaceIndex);
+        }
+        F.close_chunk();
+
+        F.open_chunk(SCENEOBJ_CHUNK_SURFACE_MODES);
+        F.w_u32(u32(Surfaces.size()));
+        for (const SSurfaceOverride& Surf : Surfaces)
+        {
+            F.w_u8(Surf.UsesShared ? 1 : 0);
         }
         F.close_chunk();
     }

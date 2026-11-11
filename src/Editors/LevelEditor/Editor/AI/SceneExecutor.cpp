@@ -6,7 +6,6 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
-#include <fstream>
 
 using AiJson = nlohmann::json;
 
@@ -30,6 +29,46 @@ public:
 	Flags32 Flags;
 };
 
+class AiOwnedDirectory final
+{
+public:
+	AiOwnedDirectory() = default;
+	~AiOwnedDirectory()
+	{
+		if (IsOwned)
+		{
+			std::error_code Code;
+			std::filesystem::remove_all(Path, Code);
+		}
+	}
+
+	bool Create(const std::filesystem::path& Value)
+	{
+		std::error_code Code;
+		Path = Value;
+		IsOwned = std::filesystem::create_directory(Path, Code) && !Code;
+		return IsOwned;
+	}
+
+	void Keep() { IsOwned = false; }
+	std::filesystem::path Path;
+
+private:
+	bool IsOwned = false;
+};
+
+static xr_string AiPathText(const std::filesystem::path& Path)
+{
+	const auto Text = Path.u8string();
+	return reinterpret_cast<const char*>(Text.c_str());
+}
+
+static bool AiFileWritten(const std::filesystem::path& Path)
+{
+	std::error_code Code;
+	return std::filesystem::is_regular_file(Path, Code) && !Code && std::filesystem::file_size(Path, Code) > 0 && !Code;
+}
+
 static bool AiHasString(const AiJson& Data, const char* Key, size_t Max = 1024)
 {
 	auto It = Data.find(Key);
@@ -40,6 +79,31 @@ static xr_string AiString(const AiJson& Data, const char* Key, const char* Defau
 {
 	auto It = Data.find(Key);
 	return It != Data.end() && It->is_string() ? xr_string(It->get_ref<const AiJson::string_t&>().c_str()) : xr_string(Default);
+}
+
+static bool AiContains(const char* Text, const xr_string& Query)
+{
+	if (Text == nullptr)
+	{
+		return Query.empty();
+	}
+	xr_string Haystack = Text;
+	xr_string Needle = Query;
+	for (xr_string* Value : {&Haystack, &Needle})
+	{
+		for (char& Character : *Value)
+		{
+			if (Character >= 'A' && Character <= 'Z')
+			{
+				Character = char(Character - 'A' + 'a');
+			}
+			if (Character == '/')
+			{
+				Character = '\\';
+			}
+		}
+	}
+	return Haystack.find(Needle) != xr_string::npos;
 }
 
 static bool AiVector(const AiJson& Data, const char* Key, Fvector& Value, float Default, float Bound)
@@ -193,7 +257,7 @@ AiSceneExecutor::Json AiSceneExecutor::Describe(CCustomObject* Object)
 	Fvector Rotation = Object->GetRotation();
 	Rotation.mul(180.f / PI);
 	const char* Reference = Object->RefName();
-	return {{"id", Identify(Object).c_str()}, {"name", Object->GetName()}, {"class_id", Object->FClassID}, {"class_name", Object->FParentTools->ClassName()}, {"reference", Reference != nullptr ? Reference : ""}, {"position_m", AiVectorJson(Object->GetPosition())}, {"rotation_degrees", AiVectorJson(Rotation)}, {"scale", AiVectorJson(Object->GetScale())}, {"selected", Object->Selected()}, {"editable", Object->Editable()}};
+	return {{"id", Identify(Object).c_str()}, {"name", Object->GetName()}, {"class_id", Object->FClassID}, {"class_name", Object->FParentTools->ClassName()}, {"reference", Reference != nullptr ? Reference : ""}, {"position_m", AiVectorJson(Object->GetPosition())}, {"rotation_degrees", AiVectorJson(Rotation)}, {"scale", AiVectorJson(Object->GetScale())}, {"selected", Object->Selected()}, {"editable", Object->Editable() && !Object->Locked() && !Object->RegionDisabled()}};
 }
 
 AiSceneExecutor::Json AiSceneExecutor::Status()
@@ -225,6 +289,11 @@ AiSceneExecutor::Json AiSceneExecutor::Status()
 
 bool AiSceneExecutor::Resolve(const Json& Params, xr_vector<CCustomObject*>& Result, Json& Failure, bool IsEditable)
 {
+	if (Params.contains("object_id") && (!AiHasString(Params, "object_id", 128) || AiString(Params, "object_id").empty() || Params.contains("ids")))
+	{
+		Failure = Error("INVALID_ID", "Supply one nonempty object_id or an ids array, not both");
+		return false;
+	}
 	auto Ids = Params.find("ids");
 	if (Ids != Params.end())
 	{
@@ -281,7 +350,7 @@ bool AiSceneExecutor::Resolve(const Json& Params, xr_vector<CCustomObject*>& Res
 	{
 		for (CCustomObject* Object : Result)
 		{
-			if (!Object->Editable() || !Object->FParentTools->IsEditable() || !Object->FParentTools->IsEnabled() || Object->m_CO_Flags.test(CCustomObject::flObjectInGroup))
+			if (Object->Locked() || Object->RegionDisabled() || !Object->Editable() || !Object->FParentTools->IsEditable() || !Object->FParentTools->IsEnabled() || Object->m_CO_Flags.test(CCustomObject::flObjectInGroup))
 			{
 				Failure = Error("OBJECT_NOT_EDITABLE", "A target is locked, disabled, or belongs to a group; target the group itself");
 				return false;
@@ -310,6 +379,33 @@ bool AiSceneExecutor::FinishChange(const AiSceneSnapshot& Before, Json& Result)
 	return true;
 }
 
+
+AiSceneExecutor::Json AiSceneExecutor::CancelOperation(const xr_string& Method, const Json& Params)
+{
+	if (!Params.is_object() || !AiIsMutation(Method) || !AiHasString(Params, "op_id", 128) || AiString(Params, "op_id").empty())
+	{
+		return Error("OPERATION_CANCELLED", "The queued read was cancelled before execution");
+	}
+	const xr_string OpId = AiString(Params, "op_id");
+	Json RequestParams = Params;
+	RequestParams.erase("deadline_ms");
+	const xr_string Request = Json{{"method", Method.c_str()}, {"params", RequestParams}}.dump(-1, ' ', false, Json::error_handler_t::replace).c_str();
+	auto Previous = Operations.find(OpId);
+	if (Previous != Operations.end())
+	{
+		if (Previous->second.Request != Request)
+		{
+			return Error("OP_ID_COLLISION", "This operation ID was used with different parameters");
+		}
+		return Previous->second.Result;
+	}
+	Json Result = Error("OPERATION_CANCELLED", "The command was cancelled before execution; no change was made");
+	Result["status"] = "cancelled";
+	Result["op_id"] = OpId.c_str();
+	Operations.emplace(OpId, Operation{Request, Result});
+	return Result;
+}
+
 AiSceneExecutor::Json AiSceneExecutor::Execute(const xr_string& Method, const Json& Params)
 {
 	if (!Params.is_object())
@@ -318,7 +414,9 @@ AiSceneExecutor::Json AiSceneExecutor::Execute(const xr_string& Method, const Js
 	}
 	const bool IsMutation = AiIsMutation(Method);
 	const xr_string OpId = AiString(Params, "op_id");
-	const xr_string Request = (Json{{"method", Method.c_str()}, {"params", Params}}.dump()).c_str();
+	Json RequestParams = Params;
+	RequestParams.erase("deadline_ms");
+	const xr_string Request = (Json{{"method", Method.c_str()}, {"params", RequestParams}}.dump(-1, ' ', false, Json::error_handler_t::replace)).c_str();
 	if (IsMutation)
 	{
 		if (!AiHasString(Params, "op_id", 128) || OpId.empty())
@@ -344,7 +442,7 @@ AiSceneExecutor::Json AiSceneExecutor::Execute(const xr_string& Method, const Js
 	if (Method == "scene.operation_status")
 	{
 		auto It = Operations.find(OpId);
-		return It == Operations.end() ? Json{{"ok", true}, {"status", "unknown"}} : Json{{"ok", true}, {"status", "completed"}, {"result", It->second.Result}};
+		return It == Operations.end() ? Json{{"ok", true}, {"status", "unknown"}} : Json{{"ok", true}, {"status", It->second.Result.value("status", "completed")}, {"result", It->second.Result}};
 	}
 	if (Scene == nullptr || EContext.UI == nullptr || !Scene->valid())
 	{
@@ -363,7 +461,7 @@ AiSceneExecutor::Json AiSceneExecutor::Execute(const xr_string& Method, const Js
 	{
 		return Error("SCENE_SESSION_REQUIRED", "Query scene.status and include scene_session before changing the editor");
 	}
-	if (IsMutation && (EContext.UI->GetEState() != esEditScene || EContext.UI->ActiveTabIndex != 0 || Scene->IsPlayInEditor()))
+	if (IsMutation && (EContext.UI->GetEState() != esEditScene || EContext.UI->ActiveTabIndex != 0 || EContext.UI->IsMouseCaptured() || !EContext.UI->IsEnableInput || Scene->IsPlayInEditor()))
 	{
 		return Error("EDITOR_NOT_EDITABLE", "Open the scene tab and finish the current editing operation");
 	}
@@ -371,6 +469,26 @@ AiSceneExecutor::Json AiSceneExecutor::Execute(const xr_string& Method, const Js
 	{
 		return Error("UNDO_DISABLED", "Enable scene Undo before requesting changes");
 	}
+	if (Params.contains("deadline_ms"))
+	{
+		if (!Params["deadline_ms"].is_number() || !std::isfinite(Params["deadline_ms"].get<double>()) || Params["deadline_ms"].get<double>() < 0 || Params["deadline_ms"].get<double>() > 9000000000000000.)
+		{
+			return Error("INVALID_DEADLINE", "deadline_ms must contain a finite Unix timestamp in milliseconds");
+		}
+		const double Now = (double)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+		if (Now >= Params["deadline_ms"].get<double>())
+		{
+			Json Expired = Error("OPERATION_CANCELLED", "The command expired before execution; no change was made");
+			Expired["status"] = "cancelled";
+			Expired["op_id"] = OpId.c_str();
+			if (IsMutation)
+			{
+				Operations.emplace(OpId, Operation{Request, Expired});
+			}
+			return Expired;
+		}
+	}
+	EditableObjectReadOnlyScope ReadOnlyLoad;
 	Json Result = Dispatch(Method, Params);
 	Result["scene_session"] = Session.c_str();
 	Result["revision"] = Scene->GetModifyCount();
@@ -421,7 +539,7 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 		{
 			CCustomObject* Object = Current[Cursor++];
 			Scanned++;
-			if ((Method == "scene.selection" && !Object->Selected()) || (!Name.empty() && xr_string(Object->GetName()).find(Name) == xr_string::npos))
+			if ((Method == "scene.selection" && !Object->Selected()) || (!Name.empty() && !AiContains(Object->GetName(), Name)))
 			{
 				continue;
 			}
@@ -430,7 +548,7 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 				continue;
 			}
 			const char* Ref = Object->RefName();
-			if (!Reference.empty() && (Ref == nullptr || xr_string(Ref).find(Reference) == xr_string::npos))
+			if (!Reference.empty() && !AiContains(Ref, Reference))
 			{
 				continue;
 			}
@@ -447,7 +565,7 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 				{
 					for (const Json& Surface : Materials["surfaces"])
 					{
-						if (AiString(Surface, "texture").find(Texture) != xr_string::npos)
+						if (AiContains(AiString(Surface, "texture").c_str(), Texture))
 						{
 							HasTexture = true;
 						}
@@ -484,6 +602,14 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 		{
 			return Error("INVALID_PATH", "Specify an absolute path for a new .level copy (up to 240 UTF-8 bytes)");
 		}
+		for (auto It = Scene->FirstTool(); It != Scene->LastTool(); ++It)
+		{
+			ESceneToolBase* Tool = It->second;
+			if (It->first != OBJCLASS_DUMMY && Tool != nullptr && Tool->IsNeedSave() && (!Tool->IsEnabled() || !Tool->IsEditable()))
+			{
+				return Error("COPY_HAS_UNAVAILABLE_TOOLS", "Enable and unlock all scene tools before saving a complete copy");
+			}
+		}
 		const xr_string Name = AiString(Params, "path");
 		const std::filesystem::path Target = std::filesystem::u8path(Name.c_str());
 		std::error_code Code;
@@ -496,27 +622,69 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 		{
 			return Error("COPY_EXISTS", "The destination scene or its part directory already exists; choose a new name");
 		}
+		AiOwnedDirectory Staging;
+		xr_string StageLeaf = ".ixray-ai-copy-";
+		StageLeaf += std::to_string(Generation).c_str();
+		StageLeaf += "-";
+		StageLeaf += std::to_string(Operations.size()).c_str();
+		if (!Staging.Create(Target.parent_path() / StageLeaf.c_str()))
 		{
-			std::ofstream Probe(Target, std::ios::out | std::ios::binary);
-			if (!Probe)
-			{
-				return Error("WRITE_DENIED", "The destination cannot be written");
-			}
+			return Error("WRITE_DENIED", "A private staging directory could not be created beside the destination");
 		}
-		std::filesystem::remove(Target, Code);
-		if (Code)
+		const std::filesystem::path StageMain = Staging.Path / Target.filename();
+		const std::filesystem::path StageParts = Staging.Path / Target.stem();
+		const xr_string StageName = AiPathText(StageMain);
+		if (StageName.size() >= 255)
 		{
-			return Error("WRITE_DENIED", "The destination write probe could not be removed");
+			return Error("PATH_TOO_LONG", "Choose a shorter destination path so the SDK can stage the scene copy");
 		}
 		const Flags32 BeforeFlags = Scene->m_RTFlags;
-		Scene->SaveLTX(Name.c_str(), false, true);
+		Scene->SaveLTX(StageName.c_str(), false, true);
 		Scene->m_RTFlags = BeforeFlags;
-		const bool IsSaved = std::filesystem::is_regular_file(Target, Code) && !Code && std::filesystem::file_size(Target, Code) > 0 && !Code;
-		if (!IsSaved)
+		if (!AiFileWritten(StageMain) || !std::filesystem::is_directory(StageParts, Code) || Code)
 		{
-			return Error("SAVE_FAILED", "The scene copy was not created; inspect the editor log and destination");
+			return Error("SAVE_FAILED", "The staged scene was not created; inspect the editor log");
 		}
-		return {{"ok", true}, {"path", Name.c_str()}, {"parts_path", Scene->LevelPartPath(Name.c_str()).c_str()}, {"verified_file", true}, {"original_scene_kept", true}};
+		Json PartFiles = Json::array();
+		for (auto It = Scene->FirstTool(); It != Scene->LastTool(); ++It)
+		{
+			ESceneToolBase* Tool = It->second;
+			if (!EScene::IsSavedTool(It->first, Tool))
+			{
+				continue;
+			}
+			const int FileCount = Tool->can_use_inifile() ? Tool->SaveFileCount() : 1;
+			for (int Index = 0; Index < FileCount; Index++)
+			{
+				xr_string PartName = Tool->ClassName();
+				if (PartName == "ai_map")
+				{
+					PartName = "ai_map_ixray";
+				}
+				PartName += ".part";
+				if (Index != 0)
+				{
+					PartName += std::to_string(Index).c_str();
+				}
+				if (!AiFileWritten(StageParts / PartName.c_str()))
+				{
+					return Error("SAVE_PART_FAILED", "A scene part was not written; the destination was left unchanged");
+				}
+				PartFiles.push_back(PartName.c_str());
+			}
+		}
+		AiOwnedDirectory FinalParts;
+		if (!FinalParts.Create(Parts))
+		{
+			return Error("COPY_EXISTS", "The destination part directory appeared during staging; no existing files were changed");
+		}
+		std::filesystem::copy(StageParts, Parts, std::filesystem::copy_options::recursive, Code);
+		if (Code || !std::filesystem::copy_file(StageMain, Target, std::filesystem::copy_options::none, Code) || Code)
+		{
+			return Error("COPY_COMMIT_FAILED", "The copy could not be committed without overwriting; no existing scene was replaced");
+		}
+		FinalParts.Keep();
+		return {{"ok", true}, {"path", Name.c_str()}, {"parts_path", AiPathText(Parts).c_str()}, {"verified_file", true}, {"verified_parts", PartFiles}, {"original_scene_kept", true}};
 	}
 
 	if (Method == "scene.place")
@@ -531,7 +699,7 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 			return Error("INVALID_REFERENCE", "The model reference must be relative to the SDK object library");
 		}
 		Fvector Position, Rotation, Scale;
-		if (!AiVector(Params, "position_m", Position, 0, 1000000) || !AiVector(Params, "rotation_degrees", Rotation, 0, 360000) || !AiVector(Params, "scale", Scale, 1, 10000) || Scale.x <= 0 || Scale.y <= 0 || Scale.z <= 0)
+		if (!AiVector(Params, "position_m", Position, 0, 1000000) || !AiVector(Params, "rotation_degrees", Rotation, 0, 360000) || !AiVector(Params, "scale", Scale, 1, 10000) || Scale.x < 0.0001f || Scale.y < 0.0001f || Scale.z < 0.0001f)
 		{
 			return Error("INVALID_TRANSFORM", "Model transform must contain finite three-component vectors and positive scale");
 		}
@@ -582,7 +750,7 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 		xr_set<xr_string> Seen;
 		for (const Json& Change : *Changes)
 		{
-			if (!Change.is_object() || !AiHasString(Change, "object_id", 128))
+			if (!Change.is_object() || !AiHasString(Change, "object_id", 128) || AiString(Change, "object_id").empty() || Change.contains("ids"))
 			{
 				return Error("INVALID_CHANGE", "Each surface change needs an object_id");
 			}
@@ -591,6 +759,10 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 			if (!Resolve(Change, ObjectsToChange, Failure, true))
 			{
 				return Failure;
+			}
+			if (ObjectsToChange.size() != 1)
+			{
+				return Error("INVALID_CHANGE", "Each surface change must resolve to exactly one instance");
 			}
 			CSceneObject* Object = smart_cast<CSceneObject*>(ObjectsToChange.front());
 			if (Object == nullptr)
@@ -626,6 +798,18 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 			Applied.push_back(Change);
 		}
 		Json Result = {{"changes", Applied}, {"library_objects_modified", false}};
+		bool HasChange = false;
+		for (const Json& Change : Applied)
+		{
+			HasChange |= !Change["changed_surfaces"].empty();
+		}
+		if (!HasChange)
+		{
+			Result["ok"] = true;
+			Result["unchanged"] = true;
+			Result["undo_steps"] = 0;
+			return Result;
+		}
 		FinishChange(Before, Result);
 		return Result;
 	}
@@ -720,6 +904,10 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 		{
 			return Error("INVALID_TRANSFORM", "Transform values must be finite vectors with positive scale factors");
 		}
+		if (Translation.x == 0 && Translation.y == 0 && Translation.z == 0 && RotationDelta.x == 0 && RotationDelta.y == 0 && RotationDelta.z == 0 && ScaleFactor.x == 1 && ScaleFactor.y == 1 && ScaleFactor.z == 1)
+		{
+			return {{"ok", true}, {"unchanged", true}, {"undo_steps", 0}};
+		}
 		RotationDelta.mul(PI / 180.f);
 		for (CCustomObject* Object : Targets)
 		{
@@ -729,10 +917,12 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 				return Error("DYNAMIC_SCALE", "Dynamic objects cannot be scaled in this SDK");
 			}
 			Fvector Position = Object->GetPosition();
+			Fvector Rotation = Object->GetRotation();
 			Fvector Scale = Object->GetScale();
 			Position.add(Translation);
+			Rotation.add(RotationDelta);
 			Scale.mul(ScaleFactor);
-			if (!_valid(Position) || !_valid(Scale) || Position.magnitude() > 10000000 || Scale.x > 100000 || Scale.y > 100000 || Scale.z > 100000)
+			if (!_valid(Position) || !_valid(Rotation) || !_valid(Scale) || Position.magnitude() > 10000000 || Scale.x < 0.0001f || Scale.y < 0.0001f || Scale.z < 0.0001f || Scale.x > 100000 || Scale.y > 100000 || Scale.z > 100000)
 			{
 				return Error("TRANSFORM_RANGE", "The resulting transform is outside the supported range");
 			}
@@ -778,6 +968,23 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 			if (Object->FClassID != OBJCLASS_SCENEOBJECT)
 			{
 				return Error("DUPLICATE_CLASS", "Version 1 duplicates scene model instances only");
+			}
+			const char* Reference = Object->RefName();
+			string_path ModelPath;
+			if (Reference == nullptr || xr_strlen(Object->GetName()) > 180)
+			{
+				return Error("INVALID_REFERENCE", "The target needs a valid model reference and a name shorter than 181 characters");
+			}
+			FS.update_path(ModelPath, _objects_, EFS.ChangeFileExt(xr_string(Reference), ".object").c_str());
+			if (!FS.exist(ModelPath))
+			{
+				return Error("MODEL_MISSING", "A target library model is missing; duplication was cancelled before appending any objects");
+			}
+			Fvector Position = Object->GetPosition();
+			Position.add(Translation);
+			if (!_valid(Position) || Position.magnitude() > 10000000)
+			{
+				return Error("TRANSFORM_RANGE", "A duplicate position would exceed the supported coordinate range");
 			}
 		}
 		AiSceneSnapshot Before;

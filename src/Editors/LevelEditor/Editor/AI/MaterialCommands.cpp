@@ -127,9 +127,7 @@ static Json EnsureLoaded(CSceneObject& Object)
 
 static Json SurfaceData(const CSurface& Surface, size_t Index)
 {
-	return {{"surface_index", Index}, {"name", Text(Surface._Name())}, {"texture", Text(Surface._Texture())},
-		{"render_shader", Text(Surface._ShaderName())}, {"compiler_shader", Text(Surface._ShaderXRLCName())},
-		{"game_material", Text(Surface._GameMtlName())}, {"shared", Surface.UseShared}};
+	return {{"surface_index", Index}, {"name", Text(Surface._Name())}, {"texture", Text(Surface._Texture())}, {"render_shader", Text(Surface._ShaderName())}, {"compiler_shader", Text(Surface._ShaderXRLCName())}, {"game_material", Text(Surface._GameMtlName())}, {"shared", Surface.UseShared}};
 }
 
 Json Read(CSceneObject& Object)
@@ -302,4 +300,4 @@ Json MissingTextures(CSceneObject& Object, size_t Offset, size_t Limit)
 	}
 	return {{"ok", true}, {"missing", std::move(Missing)}, {"total", Total}, {"offset", Offset}, {"limit", Limit}, {"has_more", Offset < Total && Total - Offset > Limit}};
 }
-}
+} // namespace AiMaterials

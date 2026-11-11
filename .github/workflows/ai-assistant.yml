@@ -7,7 +7,7 @@ permissions:
   contents: read
 concurrency:
   group: ixray-ai-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 defaults:
   run:
     shell: pwsh
@@ -32,6 +32,8 @@ jobs:
         run: ./tools/ai-assistant/build.ps1
       - name: Package and test official Codex runtime
         run: ./tools/ai-assistant/package.ps1
+      - name: Verify installed editor and update rollback
+        run: ./tools/ai-assistant/verify-package.ps1
       - name: Upload installer and portable package
         uses: actions/upload-artifact@v4
         with:
@@ -41,6 +43,8 @@ jobs:
             build/ai-release/*Portable.zip
             build/ai-release/IXRay-AI-Assistant/build-info.json
             build/ai-release/IXRay-AI-Assistant/SHA256SUMS.json
+            build/ai-release/CI_EVIDENCE.json
+            build/ai-release/ai-selftest-report.json
           if-no-files-found: error
       - name: Upload native binaries and build evidence
         uses: actions/upload-artifact@v4
@@ -51,3 +55,6 @@ jobs:
             build/x64/Editors-Windows/bin/Release/*.exe
             build/x64/Editors-Windows/bin/Release/*.dll
             build/x64/Editors-Windows/CMakeFiles/CMakeConfigureLog.yaml
+            build/ai-release/CI_EVIDENCE.json
+            build/ai-release/ai-selftest-report.json
+            build/ai-release/installed-test-evidence/**

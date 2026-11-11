@@ -19,6 +19,7 @@ export class EditorChannel extends EventEmitter {
     this.write = write;
     this.timeoutMs = timeoutMs;
     this.pending = new Map();
+    this.deadlines = new Map();
     this.buffer = '';
     this.closed = false;
   }
@@ -42,7 +43,7 @@ export class EditorChannel extends EventEmitter {
         const pending = this.pending.get(message.id);
         if (!pending) { this.emit('lateResponse', message.id); continue; }
         this.pending.delete(message.id);
-        clearTimeout(pending.timer);
+        pending.cleanup();
         if (message.error) pending.reject(codedError(message.error.code ?? 'EDITOR_ERROR', message.error.message ?? 'Ошибка редактора.', message.error.outcome));
         else pending.resolve(message.result);
       } else if (message.type === 'ui.request') {
@@ -51,26 +52,45 @@ export class EditorChannel extends EventEmitter {
     }
   }
 
-  request(method, params = {}, { timeoutMs = this.timeoutMs } = {}) {
+  request(method, params = {}, { timeoutMs = this.timeoutMs, signal } = {}) {
     if (this.closed) return Promise.reject(codedError('EDITOR_CLOSED', 'Соединение с редактором закрыто.', 'not_sent'));
+    if (signal?.aborted) return Promise.reject(codedError('CANCELED', 'Запрос отменён до отправки.', 'not_sent'));
     const id = randomUUID();
+    if (params.op_id && method !== 'scene.operation_status') {
+      if (!this.deadlines.has(params.op_id) && this.deadlines.size >= 10000) return Promise.reject(codedError('OPERATION_LIMIT', 'Достигнут предел журнала операций. Сохраните сцену и перезапустите редактор.', 'not_sent'));
+      if (!this.deadlines.has(params.op_id)) this.deadlines.set(params.op_id, Date.now() + timeoutMs);
+      params = { ...params, deadline_ms: this.deadlines.get(params.op_id) };
+    }
     return new Promise((resolve, reject) => {
+      const abort = () => {
+        if (!this.pending.delete(id)) return;
+        cleanup();
+        try { this.write({ type: 'editor.cancel', ids: [id] }); } catch {}
+        reject(codedError('REQUEST_INTERRUPTED', 'Остановка запрошена; результат отправленной операции неизвестен.', 'unknown'));
+      };
+      const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); };
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        cleanup();
+        try { this.write({ type: 'editor.cancel', ids: [id] }); } catch {}
         reject(codedError('EDITOR_TIMEOUT', 'Редактор не ответил вовремя. Результат операции неизвестен; повторяйте только с тем же op_id.', 'unknown'));
       }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { resolve, reject, timer, cleanup });
+      signal?.addEventListener('abort', abort, { once: true });
       try { this.write({ type: 'editor.request', id, method, params }); }
       catch (error) {
-        clearTimeout(timer); this.pending.delete(id);
+        cleanup(); this.pending.delete(id);
         reject(codedError('EDITOR_WRITE_FAILED', error.message, 'unknown'));
       }
     });
   }
 
   cancelPending(reason = 'Отменено до подтверждения результата.') {
+    if (this.pending.size) {
+      try { this.write({ type: 'editor.cancel', ids: [...this.pending.keys()] }); } catch {}
+    }
     for (const item of this.pending.values()) {
-      clearTimeout(item.timer);
+      item.cleanup();
       item.reject(codedError('REQUEST_INTERRUPTED', reason, 'unknown'));
     }
     this.pending.clear();
@@ -78,7 +98,7 @@ export class EditorChannel extends EventEmitter {
 
   close(error = codedError('EDITOR_CLOSED', 'Редактор закрыл соединение.', 'unknown')) {
     this.closed = true;
-    for (const item of this.pending.values()) { clearTimeout(item.timer); item.reject(error); }
+    for (const item of this.pending.values()) { item.cleanup(); item.reject(error); }
     this.pending.clear();
     this.emit('closed', error);
   }
@@ -98,6 +118,7 @@ export class LocalEditorServer extends EventEmitter {
     const name = `ixray-ai-${process.pid}-${randomBytes(16).toString('hex')}`;
     this.path = process.platform === 'win32' ? `\\\\.\\pipe\\${name}` : join(tmpdir(), `${name}.sock`);
     this.sockets = new Set();
+    this.authenticatedSockets = new Set();
     this.stopped = false;
     this.cancelGeneration = 0;
     this.beforeRequest = beforeRequest;
@@ -108,9 +129,10 @@ export class LocalEditorServer extends EventEmitter {
       this.sockets.add(socket);
       socket.setEncoding('utf8');
       let buffer = '', authenticated = false, busy = false;
+      const controllers = new Map();
       const authenticationTimer = setTimeout(() => socket.destroy(), 5000);
       socket.on('error', () => {});
-      socket.on('close', () => { clearTimeout(authenticationTimer); this.sockets.delete(socket); this.emit('clients', this.sockets.size); });
+      socket.on('close', () => { clearTimeout(authenticationTimer); for (const controller of controllers.values()) controller.abort(); this.sockets.delete(socket); this.authenticatedSockets.delete(socket); this.emit('clients', this.authenticatedSockets.size); });
       socket.on('data', chunk => {
         buffer += chunk;
         if (Buffer.byteLength(buffer) > MaxMessageBytes) { socket.destroy(); return; }
@@ -123,30 +145,34 @@ export class LocalEditorServer extends EventEmitter {
           if (!authenticated) {
             if (request.type !== 'hello' || !hasValidToken(request.token, this.token)) { socket.destroy(); return; }
             authenticated = true; clearTimeout(authenticationTimer);
+            this.authenticatedSockets.add(socket);
             socket.write(JSON.stringify({ type: 'ready', protocol: 1 }) + '\n');
-            this.emit('clients', this.sockets.size); continue;
+            this.emit('clients', this.authenticatedSockets.size); continue;
           }
+          if (request.type === 'cancel' && typeof request.id === 'string') { controllers.get(request.id)?.abort(); continue; }
           if (request.type !== 'request' || typeof request.id !== 'string' || typeof request.method !== 'string' || !request.method.startsWith('scene.')) { socket.destroy(); return; }
           if (busy) { socket.write(JSON.stringify({ id: request.id, error: { code: 'BUSY', message: 'Предыдущая команда ещё выполняется.', outcome: 'not_sent' } }) + '\n'); continue; }
           busy = true;
+          const controller = new AbortController(); controllers.set(request.id, controller);
           const generation = this.cancelGeneration;
-          const changesScene = ['scene.transform', 'scene.duplicate', 'scene.place', 'scene.undo', 'scene.redo', 'scene.material_set', 'scene.save_copy'].includes(request.method);
+          const changesScene = ['scene.select', 'scene.focus', 'scene.transform', 'scene.duplicate', 'scene.place', 'scene.undo', 'scene.redo', 'scene.material_set', 'scene.save_copy'].includes(request.method);
           if (this.stopped && changesScene) {
-            busy = false;
+            busy = false; controllers.delete(request.id);
             socket.write(JSON.stringify({ id: request.id, error: { code: 'CANCELED', message: 'Запрос отменён до выполнения.', outcome: 'canceled' } }) + '\n'); continue;
           }
           Promise.resolve().then(async () => {
-            if (this.beforeRequest) await this.beforeRequest(request.method, request.params);
+            if (controller.signal.aborted) throw codedError('CANCELED', 'Запрос отменён до отправки.', 'canceled');
+            if (this.beforeRequest) await this.beforeRequest(request.method, request.params, { signal: controller.signal });
             if (changesScene && (this.stopped || generation !== this.cancelGeneration)) throw codedError('CANCELED', 'Запрос отменён до отправки в редактор.', 'canceled');
             this.emit('operation', { method: request.method, op_id: request.params?.op_id, state: 'sent' });
-            return this.channel.request(request.method, request.params);
+            return this.channel.request(request.method, request.params, { signal: controller.signal });
           }).then(result => {
             this.emit('operation', { method: request.method, op_id: request.params?.op_id, state: result?.ok === false ? 'failed' : 'completed' });
             if (!socket.destroyed) socket.write(JSON.stringify({ id: request.id, result }) + '\n');
           }, error => {
             this.emit('operation', { method: request.method, op_id: request.params?.op_id, state: error.outcome ?? 'unknown', code: error.code });
             if (!socket.destroyed) socket.write(JSON.stringify({ id: request.id, error: { code: error.code ?? 'EDITOR_ERROR', message: error.message, outcome: error.outcome } }) + '\n');
-          }).finally(() => { busy = false; });
+          }).finally(() => { busy = false; controllers.delete(request.id); });
         }
       });
     });
@@ -167,7 +193,7 @@ export class LocalEditorServer extends EventEmitter {
 }
 
 export class LocalEditorClient {
-  constructor({ path, token, timeoutMs = 35000 }) {
+  constructor({ path, token, timeoutMs = 335000 }) {
     this.path = path; this.token = token; this.timeoutMs = timeoutMs;
     this.pending = new Map(); this.buffer = '';
   }
@@ -188,7 +214,7 @@ export class LocalEditorClient {
           let response; try { response = JSON.parse(line); } catch { this.socket.destroy(); return; }
           if (response.type === 'ready') { clearTimeout(timer); resolve(); continue; }
           const item = this.pending.get(response.id); if (!item) continue;
-          clearTimeout(item.timer); this.pending.delete(response.id);
+          item.cleanup(); this.pending.delete(response.id);
           if (response.error) item.reject(codedError(response.error.code, response.error.message, response.error.outcome));
           else item.resolve(response.result);
         }
@@ -198,16 +224,25 @@ export class LocalEditorClient {
     return this;
   }
 
-  request(method, params) {
+  request(method, params, { signal } = {}) {
     if (!this.socket || this.socket.destroyed) return Promise.reject(codedError('EDITOR_CLOSED', 'Редактор недоступен.', 'not_sent'));
+    if (signal?.aborted) return Promise.reject(codedError('CANCELED', 'Запрос отменён до отправки.', 'not_sent'));
     const id = randomUUID();
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(codedError('EDITOR_TIMEOUT', 'Результат команды неизвестен. Используйте исходный op_id.', 'unknown')); }, this.timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+      const abort = () => {
+        if (!this.pending.delete(id)) return;
+        cleanup();
+        if (!this.socket.destroyed) this.socket.write(JSON.stringify({ type: 'cancel', id }) + '\n');
+        reject(codedError('REQUEST_INTERRUPTED', 'Запрошена остановка инструмента; проверяйте результат по op_id.', 'unknown'));
+      };
+      const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); };
+      const timer = setTimeout(() => { this.pending.delete(id); cleanup(); if (!this.socket.destroyed) this.socket.write(JSON.stringify({ type: 'cancel', id }) + '\n'); reject(codedError('EDITOR_TIMEOUT', 'Результат команды неизвестен. Используйте исходный op_id.', 'unknown')); }, this.timeoutMs);
+      this.pending.set(id, { resolve, reject, timer, cleanup });
+      signal?.addEventListener('abort', abort, { once: true });
       this.socket.write(JSON.stringify({ type: 'request', id, method, params }) + '\n');
     });
   }
 
-  failAll(error) { for (const item of this.pending.values()) { clearTimeout(item.timer); item.reject(error); } this.pending.clear(); }
+  failAll(error) { for (const item of this.pending.values()) { item.cleanup(); item.reject(error); } this.pending.clear(); }
   close() { this.socket?.destroy(); this.failAll(codedError('EDITOR_CLOSED', 'Соединение закрыто.', 'unknown')); }
 }

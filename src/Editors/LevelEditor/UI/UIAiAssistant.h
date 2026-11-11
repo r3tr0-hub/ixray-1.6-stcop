@@ -39,6 +39,8 @@ private:
 	AiBridgeProcess Process;
 	xr_vector<Message> Messages;
 	xr_hash_map<xr_string, xr_string> Pending;
+	xr_deque<nlohmann::json> EditorRequests;
+	xr_hash_set<xr_string> CancelledRequests;
 	nlohmann::json Models = nlohmann::json::array();
 	nlohmann::json SceneStatus = nlohmann::json::object();
 	nlohmann::json Confirmation = nlohmann::json::object();
@@ -54,6 +56,7 @@ private:
 	u64 NextStatusTime = 0;
 	bool IsOpen = true;
 	bool IsRunningTurn = false;
+	bool IsRejectingCommands = false;
 	bool NeedsScroll = false;
 	bool HasStarted = false;
 };

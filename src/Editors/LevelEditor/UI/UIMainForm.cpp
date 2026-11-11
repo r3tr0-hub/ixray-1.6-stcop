@@ -12,6 +12,7 @@
 
 #include "IconsFontAwesome7.h"
 #include "UIAiAssistant.h"
+#include "Editor/AI/AiSelfTest.h"
 #include "../xrECore/Editor/UILightingForm.h"
 #include "../xrECore/Editor/imgui_EditorEx.h"
 
@@ -126,6 +127,7 @@ void UIMainForm::OpenSavedWindows()
 
 UIMainForm::~UIMainForm()
 {
+	AiAssistantSelfTest::Shutdown();
 	UIAiAssistant::Shutdown();
 	CEditorWndStates::Get().Save();
 
@@ -263,6 +265,7 @@ void UIMainForm::Draw()
 
 bool UIMainForm::Frame()
 {
+	AiAssistantSelfTest::Tick();
 	UIAiAssistant::Tick();
 	return EContext.UI && EContext.UI->Idle();
 }

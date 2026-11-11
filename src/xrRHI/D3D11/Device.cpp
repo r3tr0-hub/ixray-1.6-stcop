@@ -8,6 +8,19 @@ extern "C" void* IxrDxmtGetNSView(void* sdl_window);
 
 #ifdef IXR_WINDOWS
 #	include "../Drivers/AMDGPUTransferee.h"
+
+static bool IsAiWarpRequested()
+{
+	const xr_string CommandLine = Core.Params;
+	for (const xr_string& Argument : CommandLine.Split(' '))
+	{
+		if (Argument == "-ai-warp")
+		{
+			return true;
+		}
+	}
+	return false;
+}
 #endif
 
 #ifndef _countof
@@ -275,9 +288,16 @@ bool InternalDevice11::CreateD3D11()
 
 	UINT createDeviceFlags = 0;
 	bool bHasDebugRender = Core.ParamsData.test(ECoreParams::dxdebug);
+	D3D_DRIVER_TYPE DriverType = D3D_DRIVER_TYPE_HARDWARE;
 
 #ifdef IXR_WINDOWS
-	if (CAMDReader* AMDReader = GRHI->DriverExt->GetAMD(); AMDReader != nullptr && !bHasDebugRender)
+	const bool IsWarp = IsAiWarpRequested();
+	if (IsWarp)
+	{
+		DriverType = D3D_DRIVER_TYPE_WARP;
+		Msg("* AI self-test: explicit D3D11 WARP software device requested");
+	}
+	if (CAMDReader* AMDReader = GRHI->DriverExt->GetAMD(); AMDReader != nullptr && !bHasDebugRender && !IsWarp)
 	{
 		u32 NewFeatureLevel = AMDReader->GetDX11Device((void**)&RawDevice, (void**)&HWRenderContext, (void**)&HWSwapchain);
 		if (RawDevice != nullptr)
@@ -301,22 +321,14 @@ bool InternalDevice11::CreateD3D11()
 			D3D_FEATURE_LEVEL_10_1
 		};
 
-		D3D_FEATURE_LEVEL CurLevel;
+		D3D_FEATURE_LEVEL CurLevel = D3D_FEATURE_LEVEL_10_1;
 
 		HRESULT R = D3D11CreateDeviceAndSwapChain
 		(
-			0, D3D_DRIVER_TYPE_HARDWARE, nullptr, createDeviceFlags, pFeatureLevels,
+			nullptr, DriverType, nullptr, createDeviceFlags, pFeatureLevels,
 			std::size(pFeatureLevels), D3D11_SDK_VERSION, &sd, &HWSwapchain,
 			(ID3D11Device**)&RawDevice, &CurLevel, &HWRenderContext
 		);
-		FeatureLevel = CurLevel;
-
-		// main anotation
-		if (FeatureLevel == D3D_FEATURE_LEVEL_11_1)
-		{
-			R_CHK(HWRenderContext->QueryInterface(__uuidof(ID3DUserDefinedAnnotation), (void**)&g_pAnnotation));
-		}
-
 		if (FAILED(R))
 		{
 			Msg
@@ -329,6 +341,13 @@ bool InternalDevice11::CreateD3D11()
 			xrLogger::FlushLog();
 			return false;
 		};
+		FeatureLevel = CurLevel;
+
+		// Query the context only after device creation has succeeded.
+		if (FeatureLevel == D3D_FEATURE_LEVEL_11_1)
+		{
+			R_CHK(HWRenderContext->QueryInterface(__uuidof(ID3DUserDefinedAnnotation), (void**)&g_pAnnotation));
+		}
 
 		if (bHasDebugRender)
 		{
