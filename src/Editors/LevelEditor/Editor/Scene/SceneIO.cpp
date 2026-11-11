@@ -407,7 +407,7 @@ void EScene::SaveToolPart(ESceneToolBase* tool, const char* part_name, CMemoryWr
 	save_cache.clear		();
 }
 
-void EScene::SaveLTX(const char* map_name, bool bForUndo, bool bForceSaveAll)
+void EScene::SaveLTX(const char* map_name, bool bForUndo, bool bForceSaveAll, bool ProcessGit)
 {
 	VERIFY			(map_name);
 	R_ASSERT		(!bForUndo);
@@ -472,7 +472,7 @@ void EScene::SaveLTX(const char* map_name, bool bForUndo, bool bForceSaveAll)
 				SaveToolPart		(_I->second, part_name.c_str(), m_SaveCache);
 
 				// Track part file with Git LFS if applicable
-				if (Git && Git->IsRepository && Git->LfsAvailable)
+				if (ProcessGit && Git && Git->IsRepository && Git->LfsAvailable)
 					Git->ProcessFileForLFS(part_name.c_str());
 			}
 			m_SaveCache.clear	();

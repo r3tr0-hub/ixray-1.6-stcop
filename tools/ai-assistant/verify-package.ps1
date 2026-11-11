@@ -4,7 +4,8 @@ $ErrorActionPreference = 'Stop'
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 if (-not $Output) { $Output = Join-Path $Root 'build/ai-release' }
 $Evidence = [ordered]@{ commit=(& git -C $Root rev-parse HEAD).Trim(); configuration='Release'; nativeLaunch=$false; nativeSceneTests=$false; install=$false; update=$false; rollback=$false; liveChatGPTLogin=$false; liveModelTurn=$false; errors=@() }
-$TestRoot = Join-Path ([IO.Path]::GetTempPath()) ('IXRay Проверка ИИ ' + [Guid]::NewGuid().ToString('N'))
+$TemporaryParent = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [IO.Path]::GetTempPath() }
+$TestRoot = Join-Path $TemporaryParent ('ИИ SDK ' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
 $Installation = Join-Path $TestRoot 'SDK с пробелами'
 New-Item -ItemType Directory -Force $TestRoot | Out-Null
 function Save-Evidence {
@@ -42,14 +43,24 @@ try {
     # A complete update must preserve project files, program rollback and integration data.
     $UserResource = Join-Path $Installation 'rawdata/user-preservation-test.txt'
     $PreviousSentinel = Join-Path $Installation 'bin/previous-build-test.txt'
+    $PreviousTool = Join-Path $Installation 'tools/ai-assistant/previous-tool-test.txt'
+    $FileSystemConfig = Join-Path $Installation 'fs.ltx'
     [IO.File]::WriteAllText($UserResource, 'preserve resource')
     [IO.File]::WriteAllText($PreviousSentinel, 'previous build')
+    [IO.File]::WriteAllText($PreviousTool, 'previous tool')
+    Add-Content -LiteralPath $FileSystemConfig -Value '; preserve project configuration' -Encoding ascii
+    $ConfigHash = (Get-FileHash $FileSystemConfig -Algorithm SHA256).Hash
     Run-Installer
     if ((Get-Content $UserResource -Raw) -ne 'preserve resource') { throw 'Update changed the project preservation sentinel.' }
     if (-not (Test-Path (Join-Path $Installation '_previous_build/bin/previous-build-test.txt'))) { throw 'Previous program files were not backed up.' }
+    if (-not (Test-Path (Join-Path $Installation '_previous_build/tools/ai-assistant/previous-tool-test.txt'))) { throw 'Previous service files were not backed up.' }
+    if ((Get-FileHash $FileSystemConfig -Algorithm SHA256).Hash -ne $ConfigHash) { throw 'Update changed the project filesystem configuration.' }
     $Evidence.update = $true
-    & (Join-Path $Installation 'Rollback.ps1')
+    $PowerShell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+    $Rollback = Start-Process -FilePath $PowerShell -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',"`"$(Join-Path $Installation 'Rollback.ps1')`"") -Wait -PassThru
+    if ($Rollback.ExitCode -ne 0) { throw 'Rollback script failed.' }
     if (-not (Test-Path $PreviousSentinel) -or (Get-Content $UserResource -Raw) -ne 'preserve resource') { throw 'Rollback did not restore the previous program files and preserve project data.' }
+    if (-not (Test-Path $PreviousTool) -or (Get-FileHash $FileSystemConfig -Algorithm SHA256).Hash -ne $ConfigHash) { throw 'Rollback did not restore service files and project configuration.' }
     $Evidence.rollback = $true
 } catch {
     $Evidence.errors += $_.Exception.Message

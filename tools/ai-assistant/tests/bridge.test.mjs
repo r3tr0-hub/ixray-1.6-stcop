@@ -5,7 +5,7 @@ import { mkdtemp, rm, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { unzipSync, strFromU8 } from 'fflate';
-import { Bridge } from '../src/bridge.mjs';
+import { Bridge, whitelistedBuildInfo } from '../src/bridge.mjs';
 
 class FakeClient extends EventEmitter {
   constructor() { super(); this.calls = []; this.signedIn = true; this.turn = 0; }
@@ -128,6 +128,8 @@ test('diagnostic zip is a whitelist excluding credentials, scene names, asset fi
   await writeFile(join(bridge.codexHome, 'auth.json'), 'SECRET_TOKEN_CREDENTIAL');
   await writeFile(join(bridge.codexHome, 'history.json'), 'SECRET_TRANSCRIPT');
   await writeFile(join(root, 'scene.level'), 'SECRET_SCENE');
+  await mkdir(bridge.sdkRoot, { recursive: true });
+  await writeFile(join(bridge.sdkRoot, 'build-info.json'), JSON.stringify({ product: 'IXRay-AI-Assistant', version: '0.1.0', upstream: 'b'.repeat(40), commit: 'c'.repeat(40), configuration: 'Release', platform: 'Windows x64', node: '24.22.1', codex: '0.167.1', secret: 'SECRET_BUILD_FILE', credentials: { token: 'SECRET_CREDENTIAL' }, builtAt: 'UNREQUESTED_BUILD_TIME' }));
   bridge.account = { email: 'SECRET_EMAIL' }; bridge.editorStatus = { scene_name: 'SECRET_SCENE_NAME' };
   bridge.report(Object.assign(new Error('SECRET_RAW_ERROR'), { code: 'TEST_FAILURE' }));
   bridge.operations.push({ at: 'now', method: 'scene.transform', op_id: 'operation-safe', state: 'completed', secret: 'SECRET_TOOL_ARG' });
@@ -136,6 +138,15 @@ test('diagnostic zip is a whitelist excluding credentials, scene names, asset fi
   assert.deepEqual(Object.keys(files).sort(), ['README.txt', 'diagnostics.json']);
   const text = strFromU8(files['diagnostics.json']);
   assert.doesNotMatch(text, /SECRET_/); assert.match(text, /TEST_FAILURE/); assert.match(text, /operation-safe/);
+  const diagnostic = JSON.parse(text);
+  assert.deepEqual(diagnostic.editorBuild, { product: 'IXRay-AI-Assistant', version: '0.1.0', upstream: 'b'.repeat(40), commit: 'c'.repeat(40), configuration: 'Release', platform: 'Windows x64', node: '24.22.1', codex: '0.167.1' });
+  assert.doesNotMatch(text, /UNREQUESTED_BUILD_TIME/);
+});
+
+test('build provenance accepts only validated bounded scalar fields', () => {
+  assert.deepEqual(whitelistedBuildInfo({ product: { token: 'secret' }, version: 'secret', commit: 'not-a-commit', upstream: 'https://example.invalid', configuration: 'secret', platform: 'unknown', node: 'SECRET_TOKEN', codex: [] }), {});
+  assert.deepEqual(whitelistedBuildInfo(null), {});
+  assert.deepEqual(whitelistedBuildInfo({ product: 'IXRay-AI-Assistant', commit: 'a'.repeat(40), arbitrary: 'secret' }), { product: 'IXRay-AI-Assistant', commit: 'a'.repeat(40) });
 });
 
 test('connection check reports actual editor context and current model catalog', async t => {
@@ -157,4 +168,30 @@ test('persisted project thread restores official paginated history in chronologi
   assert.equal(client.calls.filter(call => call.method === 'thread/start').length, 0);
   assert.equal(client.calls.find(call => call.method === 'thread/resume').params.threadId, 'thread-old');
   assert.deepEqual(JSON.parse(await readFile(bridge.threadPath, 'utf8')), { version: 1, threadId: 'thread-old' });
+});
+
+test('simultaneous editors from the same SDK keep distinct conversations while preserving primary project history', async t => {
+  const { bridge: primary, root } = await setup(t);
+  await primary.dispatch('chat.send', { text: 'Первый редактор' });
+  const secondaryClient = new FakeClient();
+  const original = secondaryClient.request.bind(secondaryClient);
+  secondaryClient.request = async (method, params) => {
+    const result = await original(method, params);
+    return method === 'thread/start' ? { thread: { id: 'thread-secondary' } } : result;
+  };
+  const secondary = new Bridge({ sdkRoot: primary.sdkRoot, runtimeRoot: primary.runtimeRoot, dataRoot: root, clientFactory: () => secondaryClient, write: () => {} });
+  secondary.local.start = async () => {}; secondary.local.close = async () => {};
+  await secondary.start(); t.after(() => secondary.stop());
+  assert.equal(primary.ownsProfileLock, true); assert.equal(secondary.ownsProfileLock, false);
+  assert.notEqual(secondary.threadPath, primary.threadPath); assert.equal(secondary.threadId, null);
+  await secondary.dispatch('chat.send', { text: 'Второй редактор' });
+  assert.equal(secondary.threadId, 'thread-secondary');
+  assert.equal(secondaryClient.calls.filter(call => call.method === 'thread/resume').length, 0);
+  assert.equal(JSON.parse(await readFile(primary.threadPath, 'utf8')).threadId, 'thread-1');
+  assert.equal(JSON.parse(await readFile(secondary.threadPath, 'utf8')).threadId, 'thread-secondary');
+  await primary.stop();
+  const reopened = new Bridge({ sdkRoot: primary.sdkRoot, runtimeRoot: primary.runtimeRoot, dataRoot: root, clientFactory: () => new FakeClient(), write: () => {} });
+  reopened.local.start = async () => {}; reopened.local.close = async () => {};
+  await reopened.start(); t.after(() => reopened.stop());
+  assert.equal(reopened.ownsProfileLock, true); assert.equal(reopened.threadId, 'thread-1');
 });

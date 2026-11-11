@@ -1,6 +1,7 @@
 #include "stdafx.h"
 #include "SceneExecutor.h"
 #include "MaterialCommands.h"
+#include "AiText.h"
 #include "UI/UIAiAssistant.h"
 
 #include <chrono>
@@ -87,7 +88,7 @@ static bool AiContains(const char* Text, const xr_string& Query)
 	{
 		return Query.empty();
 	}
-	xr_string Haystack = Text;
+	xr_string Haystack = AiText::Utf8(Text);
 	xr_string Needle = Query;
 	for (xr_string* Value : {&Haystack, &Needle})
 	{
@@ -257,7 +258,7 @@ AiSceneExecutor::Json AiSceneExecutor::Describe(CCustomObject* Object)
 	Fvector Rotation = Object->GetRotation();
 	Rotation.mul(180.f / PI);
 	const char* Reference = Object->RefName();
-	return {{"id", Identify(Object).c_str()}, {"name", Object->GetName()}, {"class_id", Object->FClassID}, {"class_name", Object->FParentTools->ClassName()}, {"reference", Reference != nullptr ? Reference : ""}, {"position_m", AiVectorJson(Object->GetPosition())}, {"rotation_degrees", AiVectorJson(Rotation)}, {"scale", AiVectorJson(Object->GetScale())}, {"selected", Object->Selected()}, {"editable", Object->Editable() && !Object->Locked() && !Object->RegionDisabled()}};
+	return {{"id", Identify(Object).c_str()}, {"name", AiText::Utf8(Object->GetName()).c_str()}, {"class_id", Object->FClassID}, {"class_name", AiText::Utf8(Object->FParentTools->ClassName()).c_str()}, {"reference", AiText::Utf8(Reference).c_str()}, {"position_m", AiVectorJson(Object->GetPosition())}, {"rotation_degrees", AiVectorJson(Rotation)}, {"scale", AiVectorJson(Object->GetScale())}, {"selected", Object->Selected()}, {"editable", Object->Editable() && !Object->Locked() && !Object->RegionDisabled()}};
 }
 
 AiSceneExecutor::Json AiSceneExecutor::Status()
@@ -282,9 +283,9 @@ AiSceneExecutor::Json AiSceneExecutor::Status()
 			}
 		}
 		Count += ClassCount;
-		Counts.push_back({{"class_id", It->first}, {"class_name", Tool->ClassName()}, {"count", ClassCount}});
+		Counts.push_back({{"class_id", It->first}, {"class_name", AiText::Utf8(Tool->ClassName()).c_str()}, {"count", ClassCount}});
 	}
-	return {{"ok", true}, {"path", LTools->m_LastFileName.c_str()}, {"scene_name", LTools->m_LastFileName.empty() ? "Новая сцена" : LTools->m_LastFileName.c_str()}, {"editor_state", (int)EContext.UI->GetEState()}, {"editable", EContext.UI->GetEState() == esEditScene && !Scene->locked() && !Scene->IsPlayInEditor()}, {"unsaved", Scene->IsUnsaved()}, {"modified", Scene->IsModified()}, {"object_count", Count}, {"selected_count", Selected}, {"classes", Counts}, {"undo_enabled", EPrefs->scene_undo_level != 0}, {"undo_count", Scene->GetUndoCount()}, {"redo_count", Scene->GetRedoCount()}, {"coordinate_system", "left-handed; +Y up; world metres; Euler XYZ degrees; scale dimensionless"}};
+	return {{"ok", true}, {"path", AiText::Utf8(LTools->m_LastFileName.c_str()).c_str()}, {"scene_name", LTools->m_LastFileName.empty() ? "Новая сцена" : AiText::Utf8(LTools->m_LastFileName.c_str()).c_str()}, {"editor_state", (int)EContext.UI->GetEState()}, {"editable", EContext.UI->GetEState() == esEditScene && !Scene->locked() && !Scene->IsPlayInEditor()}, {"unsaved", Scene->IsUnsaved()}, {"modified", Scene->IsModified()}, {"object_count", Count}, {"selected_count", Selected}, {"classes", Counts}, {"undo_enabled", EPrefs->scene_undo_level != 0}, {"undo_count", Scene->GetUndoCount()}, {"redo_count", Scene->GetRedoCount()}, {"coordinate_system", "left-handed; +Y up; world metres; Euler XYZ degrees; scale dimensionless"}};
 }
 
 bool AiSceneExecutor::Resolve(const Json& Params, xr_vector<CCustomObject*>& Result, Json& Failure, bool IsEditable)
@@ -639,7 +640,7 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 			return Error("PATH_TOO_LONG", "Choose a shorter destination path so the SDK can stage the scene copy");
 		}
 		const Flags32 BeforeFlags = Scene->m_RTFlags;
-		Scene->SaveLTX(StageName.c_str(), false, true);
+		Scene->SaveLTX(StageName.c_str(), false, true, false);
 		Scene->m_RTFlags = BeforeFlags;
 		if (!AiFileWritten(StageMain) || !std::filesystem::is_directory(StageParts, Code) || Code)
 		{
@@ -892,7 +893,7 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 			}
 			Json Item = Method == "scene.materials" ? AiMaterials::Read(*StaticObject) : AiMaterials::MissingTextures(*StaticObject, Offset, Limit);
 			Item["object_id"] = Identify(Object).c_str();
-			Item["name"] = Object->GetName();
+			Item["name"] = AiText::Utf8(Object->GetName()).c_str();
 			Items.push_back(Item);
 		}
 		return {{"ok", true}, {"objects", Items}};

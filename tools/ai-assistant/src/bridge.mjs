@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, writeFile, rename, unlink } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename, unlink, lstat, open } from 'node:fs/promises';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -18,6 +18,33 @@ async function saveJsonAtomic(path, value) {
   const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   await writeFile(temp, JSON.stringify(value, null, 2), { mode: 0o600 });
   try { await rename(temp, path); } finally { await unlink(temp).catch(() => {}); }
+}
+
+async function readSmallJson(path, maxBytes = 65536) {
+  const metadata = await lstat(path);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > maxBytes) throw codedError('INVALID_METADATA', 'Служебный файл имеет недопустимый размер или тип.');
+  return JSON.parse(await readFile(path, 'utf8'));
+}
+
+export function whitelistedBuildInfo(source) {
+  if (!source || typeof source !== 'object' || Array.isArray(source)) return {};
+  const patterns = {
+    product: /^[A-Za-z0-9._ -]{1,128}$/,
+    version: /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/,
+    upstream: /^[a-fA-F0-9]{40,64}$/,
+    commit: /^[a-fA-F0-9]{40,64}$/,
+    configuration: /^(?:Release|RelWithDebInfo|Debug)$/,
+    platform: /^(?:Windows x64|Windows-x64|win32-x64)$/,
+    node: /^v?\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/,
+    codex: /^v?\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/
+  };
+  return Object.fromEntries(Object.entries(patterns).filter(([key, pattern]) => typeof source[key] === 'string' && source[key].length <= 128 && pattern.test(source[key])).map(([key]) => [key, source[key]]));
+}
+
+function isProcessAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return true;
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return error.code !== 'ESRCH'; }
 }
 
 function openOfficialUrl(url) {
@@ -46,6 +73,9 @@ export class Bridge {
     this.codexHome = join(this.profileRoot, 'codex');
     this.workspace = join(this.profileRoot, 'workspace');
     this.threadPath = join(this.profileRoot, 'current-thread.json');
+    this.instanceId = randomUUID();
+    this.profileLockPath = join(this.profileRoot, 'active-editor.lock');
+    this.ownsProfileLock = false;
     this.editor = new EditorChannel({ write: this.write, timeoutMs: editorTimeoutMs });
     this.local = new LocalEditorServer(this.editor, { beforeRequest: (method, params, options) => this.authorizeBatch(method, params, options) });
     this.account = null; this.models = []; this.threadId = null; this.turnId = null; this.state = 'idle'; this.starting = null;
@@ -74,7 +104,9 @@ export class Bridge {
   async start() {
     await mkdir(this.codexHome, { recursive: true, mode: 0o700 });
     await mkdir(this.workspace, { recursive: true, mode: 0o700 });
-    await this.local.start();
+    await this.acquireProfileSession();
+    try { await this.local.start(); }
+    catch (error) { await this.releaseProfileSession(); throw error; }
     // Account credentials remain entirely in Codex's own isolated home. This
     // metadata stores no credential and is never included in diagnostics.
     try {
@@ -83,6 +115,52 @@ export class Bridge {
     } catch { /* A new installation starts a new conversation. */ }
     this.event('status', this.status());
     return this;
+  }
+
+  async acquireProfileSession() {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const lock = await open(this.profileLockPath, 'wx', 0o600);
+        try { await lock.writeFile(JSON.stringify({ pid: process.pid, instanceId: this.instanceId })); }
+        finally { await lock.close(); }
+        this.ownsProfileLock = true;
+        return;
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+        if (attempt === 0) {
+          let recovery;
+          const recoveryPath = `${this.profileLockPath}.recovery`;
+          try {
+            // Only one contender may reap a stale marker. Other editors can
+            // safely take the primary lock after removal; this instance then
+            // observes EEXIST on the second attempt and uses its own thread.
+            recovery = await open(recoveryPath, 'wx', 0o600);
+            const owner = await readSmallJson(this.profileLockPath, 4096);
+            if (!isProcessAlive(owner.pid)) {
+              await unlink(this.profileLockPath);
+              continue;
+            }
+          } catch { /* Preserve any foreign, malformed, or unreadable marker. */ }
+          finally { if (recovery) { await recovery.close(); await unlink(recoveryPath).catch(() => {}); } }
+        }
+        break;
+      }
+    }
+    // A second editor controls its own nonce-bound scene and starts a separate
+    // conversation. The primary project history is retained for later launches.
+    const instances = join(this.profileRoot, 'instances');
+    await mkdir(instances, { recursive: true, mode: 0o700 });
+    this.threadPath = join(instances, `${this.instanceId}.json`);
+    this.event('status', { ...this.status(), separateConversation: true });
+  }
+
+  async releaseProfileSession() {
+    if (!this.ownsProfileLock) return;
+    this.ownsProfileLock = false;
+    try {
+      const owner = await readSmallJson(this.profileLockPath, 4096);
+      if (owner.pid === process.pid && owner.instanceId === this.instanceId) await unlink(this.profileLockPath);
+    } catch { /* A missing marker does not prevent process shutdown. */ }
   }
 
   async ensureClient() {
@@ -285,11 +363,14 @@ export class Bridge {
     const directory = join(this.profileRoot, 'diagnostics'); await mkdir(directory, { recursive: true, mode: 0o700 });
     let codexVersion = '0.167.1';
     try { const lock = JSON.parse(await readFile(join(Here, '../codex-download.json'), 'utf8')); codexVersion = lock.version ?? codexVersion; } catch {}
+    let editorBuild = {};
+    try { editorBuild = whitelistedBuildInfo(await readSmallJson(join(this.sdkRoot, 'build-info.json'))); } catch {}
     // Deliberate allowlist: never read auth.json, config, sessions, transcript,
     // asset files, raw stderr, tool arguments, or model responses.
     const snapshot = {
       generatedAt: new Date().toISOString(),
       versions: { integration: Version, node: process.version, codex: codexVersion, mcpSdk: '1.32.2' },
+      editorBuild,
       platform: { os: process.platform, architecture: process.arch },
       connections: { appServer: this.client ? 'ready' : 'disconnected', mcp: this.mcpClients ? 'connected' : 'waiting', editor: this.editor.closed ? 'disconnected' : 'connected', turn: this.state },
       errors: this.errorCodes.slice(-100),
@@ -360,6 +441,7 @@ export class Bridge {
     this.approvals.clear();
     await this.client?.stop(); this.client = null;
     await this.local.close();
+    await this.releaseProfileSession();
   }
 }
 

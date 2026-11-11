@@ -155,7 +155,7 @@ public:
 	bool 			Load(const char* map_name, bool bUndo);
 	bool 			LoadLTX(const char* map_name, bool bUndo);
 
-	void 			SaveLTX(const char* map_name, bool bUndo, bool bForceSaveAll);
+	void 			SaveLTX(const char* map_name, bool bUndo, bool bForceSaveAll, bool ProcessGit = true);
 
 	bool 			LoadSelection(const char* fname);
 	void 			SaveSelection(ObjClassID classfilter, const char* fname);

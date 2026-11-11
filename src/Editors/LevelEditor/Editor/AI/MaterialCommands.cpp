@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "MaterialCommands.h"
+#include "AiText.h"
 #include "Editor/Entry/StaticObject/SceneObject.h"
 #include "../../../xrECore/Editor/EditorSceneSubmit.h"
 #include "../../../../Layers/xrRenderPC_R4/blenders/Blender.h"
@@ -13,14 +14,14 @@ static Json Error(const char* Code, const char* Message)
 	return {{"ok", false}, {"error", {{"code", Code}, {"message", Message}}}};
 }
 
-static const char* Text(const char* Value)
+static Json Text(const char* Value)
 {
-	return Value ? Value : "";
+	return AiText::Utf8(Value).c_str();
 }
 
 static bool NormalizeResource(const char* Input, xr_string& Output, bool IsTexture)
 {
-	Output = Text(Input);
+	Output = Input ? Input : "";
 	if (Output.empty() || Output.size() >= 500 || Output.front() == '/' || Output.front() == '\\')
 	{
 		return false;
@@ -65,7 +66,7 @@ static Json TextureResource(const char* Texture)
 	}
 	if (Name == "$null" || Name.find("$user$") != xr_string::npos)
 	{
-		return {{"exists", true}, {"kind", "runtime"}, {"resource", Name.c_str()}};
+		return {{"exists", true}, {"kind", "runtime"}, {"resource", Text(Name.c_str())}};
 	}
 	string_path Path;
 	// Keep the renderer's resolution order; FS.exist includes mounted archives and addons.
@@ -73,20 +74,20 @@ static Json TextureResource(const char* Texture)
 	{
 		if (FS.path_exist(_game_textures_) && FS.exist(Path, _game_textures_, Name.c_str(), Extension))
 		{
-			return {{"exists", true}, {"kind", "game_texture"}, {"alias", _game_textures_}, {"path", Path}};
+			return {{"exists", true}, {"kind", "game_texture"}, {"alias", _game_textures_}, {"path", Text(Path)}};
 		}
 	}
 	for (const char* Alias : {"$level$", "$game_saves$", _game_textures_})
 	{
 		if (FS.path_exist(Alias) && FS.exist(Path, Alias, Name.c_str(), ".dds"))
 		{
-			return {{"exists", true}, {"kind", "dds"}, {"alias", Alias}, {"path", Path}};
+			return {{"exists", true}, {"kind", "dds"}, {"alias", Alias}, {"path", Text(Path)}};
 		}
 	}
-	Json Result = {{"exists", false}, {"resource", Name.c_str()}, {"reason", "no_renderable_texture"}};
+	Json Result = {{"exists", false}, {"resource", Text(Name.c_str())}, {"reason", "no_renderable_texture"}};
 	if (FS.path_exist(_textures_) && FS.exist(Path, _textures_, Name.c_str(), ".tga"))
 	{
-		Result["source_path"] = Path;
+		Result["source_path"] = Text(Path);
 		Result["reason"] = "source_tga_requires_texture_synchronization";
 	}
 	return Result;
@@ -125,9 +126,32 @@ static Json EnsureLoaded(CSceneObject& Object)
 	return {{"ok", true}};
 }
 
-static Json SurfaceData(const CSurface& Surface, size_t Index)
+static Json SurfaceData(const CSurface& Surface, size_t Index, bool IsInternal = false)
 {
-	return {{"surface_index", Index}, {"name", Text(Surface._Name())}, {"texture", Text(Surface._Texture())}, {"render_shader", Text(Surface._ShaderName())}, {"compiler_shader", Text(Surface._ShaderXRLCName())}, {"game_material", Text(Surface._GameMtlName())}, {"shared", Surface.UseShared}};
+	auto StringLambda = [IsInternal](const char* Value) -> Json
+	{
+		return IsInternal ? Json(Value ? Value : "") : Text(Value);
+	};
+	return {{"surface_index", Index}, {"name", StringLambda(Surface._Name())}, {"texture", StringLambda(Surface._Texture())}, {"render_shader", StringLambda(Surface._ShaderName())}, {"compiler_shader", StringLambda(Surface._ShaderXRLCName())}, {"game_material", StringLambda(Surface._GameMtlName())}, {"shared", Surface.UseShared}};
+}
+
+static xr_string PreserveResourceEncoding(const xr_string& Input, const Json& Current, bool IsTexture)
+{
+	xr_string RawCurrent;
+	if (NormalizeResource(Current.get_ref<const Json::string_t&>().c_str(), RawCurrent, IsTexture) && AiText::Utf8(RawCurrent.c_str()) == Input)
+	{
+		return RawCurrent;
+	}
+	return Input;
+}
+
+static Json ExportValues(Json Values)
+{
+	for (const char* Key : {"name", "texture", "render_shader", "compiler_shader", "game_material"})
+	{
+		Values[Key] = Text(Values[Key].get_ref<const Json::string_t&>().c_str());
+	}
+	return Values;
 }
 
 Json Read(CSceneObject& Object)
@@ -177,7 +201,7 @@ Json ValidatePatch(CSceneObject& Object, const Json& Change)
 		return Error("invalid_surface_index", "Поверхность с указанным индексом отсутствует.");
 	}
 	const CSurface& Surface = *Object.m_Surfaces[Index];
-	Json Final = SurfaceData(Surface, size_t(Index));
+	Json Final = SurfaceData(Surface, size_t(Index), true);
 	bool HasChange = false;
 	for (const char* Key : {"texture", "render_shader", "compiler_shader", "game_material"})
 	{
@@ -192,6 +216,7 @@ Json ValidatePatch(CSceneObject& Object, const Json& Change)
 			{
 				return Error("invalid_resource", "Недопустимое имя ресурса; используйте относительное имя из библиотеки SDK.");
 			}
+			Value = PreserveResourceEncoding(Value, Final[Key], xr_strcmp(Key, "texture") == 0);
 			Final[Key] = Value.c_str();
 			HasChange = true;
 		}
@@ -236,7 +261,7 @@ Json ValidatePatch(CSceneObject& Object, const Json& Change)
 	{
 		return Error("reserved_game_material", "Материал materials\\occ зарезервирован SDK.");
 	}
-	return {{"ok", true}, {"normalized", std::move(Final)}};
+	return {{"ok", true}, {"normalized", ExportValues(std::move(Final))}};
 }
 
 Json ApplyPatch(CSceneObject& Object, const Json& Change)
@@ -246,14 +271,24 @@ Json ApplyPatch(CSceneObject& Object, const Json& Change)
 	{
 		return Validation;
 	}
-	const Json& Final = Validation["normalized"];
-	const size_t Index = Final["surface_index"].get<size_t>();
+	const size_t Index = Change["surface_index"].get<size_t>();
 	CSurface& Surface = *Object.m_Surfaces[Index];
+	Json Final = SurfaceData(Surface, Index, true);
+	for (const char* Key : {"texture", "render_shader", "compiler_shader", "game_material"})
+	{
+		if (Change.contains(Key))
+		{
+			xr_string Value;
+			NormalizeResource(Change[Key].get_ref<const Json::string_t&>().c_str(), Value, xr_strcmp(Key, "texture") == 0);
+			Value = PreserveResourceEncoding(Value, Final[Key], xr_strcmp(Key, "texture") == 0);
+			Final[Key] = Value.c_str();
+		}
+	}
 	const Json Before = SurfaceData(Surface, Index);
 	bool HasChange = false;
 	for (const char* Key : {"texture", "render_shader", "compiler_shader", "game_material"})
 	{
-		HasChange |= Before[Key] != Final[Key];
+		HasChange |= Before[Key] != Text(Final[Key].get_ref<const Json::string_t&>().c_str());
 	}
 	Json Changed = Json::array();
 	if (!HasChange)

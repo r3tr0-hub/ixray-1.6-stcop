@@ -294,6 +294,33 @@ private:
 			{
 				Check("reload_copy_keeps_transforms_materials", Call("scene.status").value("object_count", 0) == 2 && HasPosition(1) && HasExpectedTextures());
 				Check("library_object_byte_exact_after_reload", ReadBytes(LibraryPath) == OriginalLibrary);
+				CCustomObject* Object = Scene->FindObjectByName("ai_cube", OBJCLASS_SCENEOBJECT);
+				if (Object != nullptr)
+				{
+					const xr_string PreviousName = Object->GetName();
+					const bool WasSelected = Object->Selected();
+					Object->Select(true);
+					const xr_string LegacyName = Platform::UTF8_to_CP1251("тест_объект");
+					Object->SetName(LegacyName.c_str());
+					const Json Found = Call("scene.search", {{"name", "тест_объект"}});
+					Check("legacy_cp1251_name_search_utf8", IsOk(Found) && Found.contains("objects") && Found["objects"].size() == 1 && String(Found["objects"][0], "name") == "тест_объект", Found);
+					const Json Selected = Call("scene.selection");
+					bool HasLegacyName = false;
+					if (IsOk(Selected) && Selected.contains("objects"))
+					{
+						for (const Json& Item : Selected["objects"])
+						{
+							HasLegacyName |= String(Item, "name") == "тест_объект";
+						}
+					}
+					Check("legacy_cp1251_selection_name_utf8", HasLegacyName, Selected);
+					Object->SetName(PreviousName.c_str());
+					Object->Select(WasSelected);
+				}
+				else
+				{
+					Check("legacy_cp1251_test_target", false);
+				}
 				break;
 			}
 			case 11:

@@ -21,6 +21,29 @@
 ECORE_API extern bool bIsLevelEditor;
 CLevelMain* LUI = (CLevelMain*)EContext.UI;
 
+static void NormalizeLevelFileName(xr_string& FileName)
+{
+#ifdef IXR_WINDOWS
+	// LevelEditor uses a UTF-8 active code page. Legacy recent-file entries may
+	// still contain CP1251, but filesystem paths must stay UTF-8 after this point.
+	if (!IsUTF8(FileName.c_str()))
+	{
+		FileName = Platform::ANSI_TO_UTF8(FileName);
+	}
+	// Fold resource keys without applying locale-dependent case conversion to
+	// the individual bytes of a UTF-8 sequence.
+	for (char& Character : FileName)
+	{
+		if (Character >= 'A' && Character <= 'Z')
+		{
+			Character = Character - 'A' + 'a';
+		}
+	}
+#else
+	xr_strlwr(FileName);
+#endif
+}
+
 CLevelMain::CLevelMain()
 {
 	m_Cursor = new C3DCursor();
@@ -216,12 +239,14 @@ CCommandVar CommandLoad(CCommandVar p1, CCommandVar p2)
 		{
 			xr_string temp_fn = p1;
 
+#ifndef IXR_WINDOWS
 			if (IsUTF8(temp_fn.c_str()))
 			{
 				temp_fn = Platform::UTF8_to_CP1251(temp_fn);
 			}
+#endif
 
-			xr_strlwr(temp_fn);
+			NormalizeLevelFileName(temp_fn);
 
 			if (!Scene->IfModified())
 				return false;
@@ -358,7 +383,7 @@ CCommandVar CommandSave(CCommandVar p1, CCommandVar p2)
 			}
 			else
 			{
-				xr_strlwr(temp_fn);
+				NormalizeLevelFileName(temp_fn);
 
 				EContext.UI->SetStatus("Level saving...");
 				Scene->SaveLTX(temp_fn.c_str(), false, (p2 == 66));
