@@ -62,8 +62,16 @@ try {
     if ((Get-FileHash $FileSystemConfig -Algorithm SHA256).Hash -ne $ConfigHash) { throw 'Update changed the project filesystem configuration.' }
     $Evidence.update = $true
     $PowerShell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
-    $Rollback = Start-Process -FilePath $PowerShell -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',"`"$(Join-Path $Installation 'Rollback.ps1')`"") -Wait -PassThru
-    if ($Rollback.ExitCode -ne 0) { throw 'Rollback script failed.' }
+    $RollbackOut = Join-Path $TestRoot 'rollback.stdout.log'
+    $RollbackErr = Join-Path $TestRoot 'rollback.stderr.log'
+    $Rollback = Start-Process -FilePath $PowerShell -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',"`"$(Join-Path $Installation 'Rollback.ps1')`"") -RedirectStandardOutput $RollbackOut -RedirectStandardError $RollbackErr -Wait -PassThru
+    $Evidence.rollbackExitCode = $Rollback.ExitCode
+    if ($Rollback.ExitCode -ne 0) {
+        foreach ($Log in @($RollbackOut,$RollbackErr)) {
+            if (Test-Path -LiteralPath $Log) { Write-Host (Get-Content -LiteralPath $Log -Raw) }
+        }
+        throw "Rollback script failed with exit code $($Rollback.ExitCode); see rollback logs."
+    }
     if (-not (Test-Path $PreviousSentinel) -or (Get-Content $UserResource -Raw) -ne 'preserve resource') { throw 'Rollback did not restore the previous program files and preserve project data.' }
     if (-not (Test-Path $PreviousTool) -or (Get-FileHash $FileSystemConfig -Algorithm SHA256).Hash -ne $ConfigHash) { throw 'Rollback did not restore service files and project configuration.' }
     $Evidence.rollback = $true

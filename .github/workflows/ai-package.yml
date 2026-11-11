@@ -9,11 +9,11 @@ defaults:
   run:
     shell: pwsh
 env:
-  NATIVE_COMMIT: dcf188fbdff14929dfd82ee725e6fac78d54a9f1
-  NATIVE_RUN_ID: '42934583041'
+  NATIVE_COMMIT: a8fbcc4725a4474fd4684d81aca0985d3fd4bacf
+  NATIVE_RUN_ID: '42941939771'
 jobs:
   package:
-    if: contains(github.event.head_commit.message, '[package-only]') && !contains(github.event.head_commit.message, '[inspect-package]')
+    if: contains(github.event.head_commit.message, '[package-only]') && !contains(github.event.head_commit.message, '[inspect-package]') && !contains(github.event.head_commit.message, '[rollback-probe]')
     runs-on: windows-2022
     timeout-minutes: 30
     steps:
@@ -29,7 +29,7 @@ jobs:
       - name: Download coherent native Release binaries
         uses: actions/download-artifact@v4
         with:
-          name: ixray-ai-build-evidence-dcf188fbdff14929dfd82ee725e6fac78d54a9f1
+          name: ixray-ai-build-evidence-${{ env.NATIVE_COMMIT }}
           run-id: ${{ env.NATIVE_RUN_ID }}
           github-token: ${{ github.token }}
           path: build/reused-native

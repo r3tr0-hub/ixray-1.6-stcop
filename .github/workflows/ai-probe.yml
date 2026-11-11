@@ -17,8 +17,8 @@ jobs:
       - name: Download the coherent portable SDK
         uses: actions/download-artifact@v4
         with:
-          name: IXRay-AI-Portable-inspect8
-          run-id: '42939767904'
+          name: IXRay-AI-Portable-a8fbcc4725a4474fd4684d81aca0985d3fd4bacf
+          run-id: '42941939771'
           github-token: ${{ github.token }}
           path: probe-download
       - name: Launch real editor and inspect its scene self-test
@@ -30,8 +30,8 @@ jobs:
           $SDK = Join-Path $ProbeRoot 'SDK с пробелами'
           New-Item -ItemType Directory -Force $SDK | Out-Null
           $Evidence = [ordered]@{
-              nativeCommit='dcf188fbdff14929dfd82ee725e6fac78d54a9f1'
-              artifactRun='42939767904'
+              nativeCommit='a8fbcc4725a4474fd4684d81aca0985d3fd4bacf'
+              artifactRun='42941939771'
               extracted=$false
               launched=$false
               nativeTestsPassed=$false

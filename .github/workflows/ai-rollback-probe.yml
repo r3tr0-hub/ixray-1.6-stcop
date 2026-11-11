@@ -1,0 +1,38 @@
+name: IXRay AI Rollback Diagnostic
+on:
+  push:
+    branches: [feature/level-editor-ai]
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: pwsh
+jobs:
+  rollback:
+    if: contains(github.event.head_commit.message, '[rollback-probe]')
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Download exact existing installer
+        uses: actions/download-artifact@v4
+        with:
+          name: IXRay-AI-Setup-a8fbcc4725a4474fd4684d81aca0985d3fd4bacf
+          run-id: '42941939771'
+          github-token: ${{ github.token }}
+          path: build/ai-release
+      - name: Capture exact rollback failure from installed package
+        run: ./tools/ai-assistant/verify-package.ps1
+      - name: Upload rollback diagnostic evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: IXRay-AI-Rollback-Diagnostic-${{ github.sha }}
+          path: |
+            build/ai-release/CI_EVIDENCE.json
+            build/ai-release/ai-selftest-report.json
+            build/ai-release/installed-test-evidence/**
+          if-no-files-found: warn
