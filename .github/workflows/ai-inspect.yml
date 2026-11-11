@@ -1,0 +1,49 @@
+name: IXRay AI Installer Evidence
+on:
+  push:
+    branches: [feature/level-editor-ai]
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: pwsh
+jobs:
+  inspect:
+    if: contains(github.event.head_commit.message, '[inspect-package]')
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - name: Download existing package and logs
+        uses: actions/download-artifact@v4
+        with:
+          name: IXRay-AI-Assistant-Windows-x64-57f3e3a6d895ba1ef67f414cf2d7ca2c2231d5fe
+          run-id: '42938239220'
+          github-token: ${{ github.token }}
+          path: inspect
+      - name: Print installer evidence
+        run: |
+          Get-ChildItem inspect -Recurse -File | Select-Object FullName,Length | Format-Table -AutoSize
+          Get-ChildItem inspect -Recurse -File -Filter '*.log' | ForEach-Object {
+            Write-Host "Installer log: $($_.Name)"
+            Get-Content -LiteralPath $_.FullName -Tail 200
+          }
+          Get-ChildItem inspect -Recurse -File -Filter 'CI_EVIDENCE.json' | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }
+      - name: Upload installer separately
+        uses: actions/upload-artifact@v4
+        with:
+          name: IXRay-AI-Setup-inspect8
+          path: inspect/*Setup.exe
+      - name: Upload portable package separately
+        uses: actions/upload-artifact@v4
+        with:
+          name: IXRay-AI-Portable-inspect8
+          path: inspect/*Portable.zip
+      - name: Upload logs separately
+        uses: actions/upload-artifact@v4
+        with:
+          name: IXRay-AI-Installer-Logs-inspect8
+          path: |
+            inspect/installed-test-evidence/**
+            inspect/CI_EVIDENCE.json
+            inspect/IXRay-AI-Assistant/build-info.json

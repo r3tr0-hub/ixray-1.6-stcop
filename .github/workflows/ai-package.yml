@@ -13,7 +13,7 @@ env:
   NATIVE_RUN_ID: '42934583041'
 jobs:
   package:
-    if: contains(github.event.head_commit.message, '[package-only]')
+    if: contains(github.event.head_commit.message, '[package-only]') && !contains(github.event.head_commit.message, '[inspect-package]')
     runs-on: windows-2022
     timeout-minutes: 30
     steps:
@@ -52,14 +52,26 @@ jobs:
           }
       - name: Verify installed editor, scene operations and rollback
         run: ./tools/ai-assistant/verify-package.ps1
-      - name: Upload installer, portable package and evidence
+      - name: Upload installer
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: IXRay-AI-Assistant-Windows-x64-${{ github.sha }}
+          name: IXRay-AI-Setup-${{ github.sha }}
+          path: build/ai-release/*Setup.exe
+          if-no-files-found: warn
+      - name: Upload portable package
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: IXRay-AI-Portable-${{ github.sha }}
+          path: build/ai-release/*Portable.zip
+          if-no-files-found: warn
+      - name: Upload test evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: IXRay-AI-Evidence-${{ github.sha }}
           path: |
-            build/ai-release/*Setup.exe
-            build/ai-release/*Portable.zip
             build/ai-release/IXRay-AI-Assistant/build-info.json
             build/ai-release/IXRay-AI-Assistant/SHA256SUMS.json
             build/ai-release/CI_EVIDENCE.json
