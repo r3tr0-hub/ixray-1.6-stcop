@@ -32,7 +32,7 @@ function Save-DesktopScreenshot([string]$Name) {
     }
 }
 function Run-Installer {
-    $Installer = Join-Path $Output 'IXRay-AI-Assistant-0.2.0-Windows-x64-Setup.exe'
+    $Installer = Join-Path $Output 'IXRay-AI-Assistant-0.3.0-Windows-x64-Setup.exe'
     $Log = Join-Path $TestRoot ('installer-' + [Guid]::NewGuid().ToString('N') + '.log')
     $Process = Start-Process -FilePath $Installer -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=`"$Installation`"","/LOG=`"$Log`"") -Wait -PassThru
     if ($Process.ExitCode -ne 0) { throw "Installer failed with exit code $($Process.ExitCode)." }

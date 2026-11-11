@@ -44,6 +44,7 @@ private:
 	nlohmann::json Models = nlohmann::json::array();
 	nlohmann::json SceneStatus = nlohmann::json::object();
 	nlohmann::json Confirmation = nlohmann::json::object();
+	xr_string Provider = "codex";
 	xr_string SelectedModel;
 	xr_string AuthStatus = "Не выполнен вход";
 	xr_string McpStatus = "Ожидание";
@@ -56,6 +57,7 @@ private:
 	u64 NextStatusTime = 0;
 	bool IsOpen = true;
 	bool IsRunningTurn = false;
+	bool IsSwitchingProvider = false;
 	bool IsRejectingCommands = false;
 	bool NeedsScroll = false;
 	bool HasStarted = false;

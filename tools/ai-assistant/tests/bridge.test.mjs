@@ -27,15 +27,15 @@ class FakeClient extends EventEmitter {
   async stop() { this.stopped = true; }
 }
 
-async function setup(t, client = new FakeClient(), { savedThread, nativeBrowser = false } = {}) {
+async function setup(t, client = new FakeClient(), { savedThread, nativeBrowser = false, ollamaFetch, editorReply } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'IXRay тест с пробелами-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const messages = [], native = [];
-  const bridge = new Bridge({ sdkRoot: join(root, 'SDK с пробелами'), runtimeRoot: join(root, 'runtime'), dataRoot: root, clientFactory: () => client, ...(nativeBrowser ? {} : { openUrl: url => { messages.push({ opened: url }); } }), write: message => {
+  const bridge = new Bridge({ sdkRoot: join(root, 'SDK с пробелами'), runtimeRoot: join(root, 'runtime'), dataRoot: root, clientFactory: () => client, ollamaFetch, ...(nativeBrowser ? {} : { openUrl: url => { messages.push({ opened: url }); } }), write: message => {
     messages.push(message);
     if (message.type === 'editor.request') {
       native.push(message);
-      const result = message.method === 'scene.selection' ? { ok: true, objects: [] } : { ok: true, scene_session: 'scene-1', scene_name: 'Тестовая сцена', selected_count: 1 };
+      const result = editorReply?.(message) ?? (message.method === 'scene.selection' ? { ok: true, objects: [] } : { ok: true, scene_session: 'scene-1', scene_name: 'Тестовая сцена', selected_count: 1 });
       queueMicrotask(() => bridge.editor.push(JSON.stringify({ type: 'editor.response', id: message.id, result }) + '\n'));
     }
   } });
@@ -257,4 +257,119 @@ test('simultaneous editors from the same SDK keep distinct conversations while p
   reopened.local.start = async () => {}; reopened.local.close = async () => {};
   await reopened.start(); t.after(() => reopened.stop());
   assert.equal(reopened.ownsProfileLock, true); assert.equal(reopened.threadId, 'thread-1');
+});
+
+const installedOllamaModels = () => Response.json({ models: [
+  { name: 'deepseek-r1:14b', size: 9_000_000_000 },
+  { name: 'deepseek-r1:8b', size: 5_200_000_000 },
+  { name: 'fake:cloud', size: 20 },
+  { name: 'alias:latest', size: 20, remote_host: 'https://ollama.com' }
+] });
+const toolMessage = (name, args) => Response.json({
+  message: { role: 'assistant', content: '', tool_calls: [{ function: { name, arguments: args } }] }
+});
+
+test('Ollama uses the registered MCP tools to move a cube and reread its coordinates without Codex', async t => {
+  let round = 0, x = 0;
+  const ollamaFetch = async (url, options) => {
+    assert.match(url, /^http:\/\/127\.0\.0\.1:11434\/api\//);
+    assert.equal(options.redirect, 'error');
+    if (url.endsWith('/tags')) return installedOllamaModels();
+    if (url.endsWith('/show')) return Response.json({ capabilities: ['completion', 'tools'] });
+    const { model, tools, messages } = JSON.parse(options.body);
+    assert.equal(model, 'deepseek-r1:8b');
+    assert.ok(tools.some(tool => tool.function.name === 'scene_transform'));
+    assert.ok(!tools.some(tool => tool.function.name === 'scene_viewport'));
+    const last = messages.at(-1);
+    switch (round++) {
+      case 0: return toolMessage('scene_status', {});
+      case 1:
+        assert.equal(last.tool_name, 'scene_status');
+        assert.equal(JSON.parse(last.content).scene_session, 'scene-1');
+        return toolMessage('scene_search', { name: 'ai_cube' });
+      case 2:
+        assert.equal(JSON.parse(last.content).objects[0].position_m[0], 0);
+        return toolMessage('scene_transform', { scene_session: 'scene-1', ids: ['cube-id'], translation_m: [1, 0, 0] });
+      case 3:
+        assert.equal(JSON.parse(last.content).ok, true);
+        return toolMessage('scene_search', { name: 'ai_cube' });
+      default:
+        assert.equal(JSON.parse(last.content).objects[0].position_m[0], 1);
+        return Response.json({ message: { role: 'assistant', content: 'Куб перемещён. Координата X = 1 м.' } });
+    }
+  };
+  const editorReply = ({ method, params }) => {
+    if (method === 'scene.transform') {
+      assert.match(params.op_id, /^[0-9a-f-]{36}$/);
+      assert.ok(Number.isSafeInteger(params.deadline_ms));
+      assert.equal(params.scene_session, 'scene-1');
+      assert.deepEqual(params.ids, ['cube-id']);
+      x += params.translation_m[0];
+      return { ok: true, op_id: params.op_id };
+    }
+    if (method === 'scene.search') return { ok: true, objects: [{ id: 'cube-id', name: 'ai_cube', position_m: [x, 0, 0] }] };
+  };
+  const { bridge, client, messages, native } = await setup(t, undefined, { ollamaFetch, editorReply });
+  const models = await bridge.dispatch('provider.select', { provider: 'ollama' });
+  assert.equal(models.defaultModel, 'deepseek-r1:8b');
+  assert.equal(models.models.length, 2);
+  await bridge.dispatch('chat.send', { text: 'Передвинь ai_cube на метр по X и проверь.' });
+  await bridge.ollamaTask;
+  assert.equal(bridge.state, 'idle', JSON.stringify(messages.filter(m => m.event === 'error')));
+  assert.equal(x, 1);
+  assert.deepEqual(native.map(m => m.method), ['scene.status', 'scene.search', 'scene.transform', 'scene.search']);
+  assert.ok(messages.some(m => m.event === 'agent.delta' && m.params.delta.includes('X = 1')));
+  assert.equal(client.calls.length, 0);
+  assert.equal((await bridge.dispatch('chat.history')).messages.length, 2);
+  await bridge.dispatch('provider.select', { provider: 'codex' });
+  assert.ok(client.calls.some(call => call.method === 'model/list'));
+});
+
+test('Ollama discovers other MCP tools and validates tool arguments before forwarding', async t => {
+  let round = 0;
+  const ollamaFetch = async (url, options) => {
+    if (url.endsWith('/tags')) return installedOllamaModels();
+    if (url.endsWith('/show')) return Response.json({ capabilities: ['tools'] });
+    const { messages, tools } = JSON.parse(options.body);
+    switch (round++) {
+      case 0:
+        assert.ok(!tools.some(tool => tool.function.name === 'scene_ai_map_read'));
+        return toolMessage('ixray_find_tools', { query: 'scene_ai_map_read' });
+      case 1:
+        assert.ok(tools.some(tool => tool.function.name === 'scene_ai_map_read'));
+        return toolMessage('scene_ai_map_read', { offset: -1 });
+      case 2:
+        assert.match(messages.at(-1).content, /offset/);
+        return toolMessage('scene_ai_map_read', { offset: 0 });
+      default:
+        return Response.json({ message: { role: 'assistant', content: 'AI Map прочитана.' } });
+    }
+  };
+  const { bridge, native, messages } = await setup(t, undefined, { ollamaFetch });
+  await bridge.dispatch('provider.select', { provider: 'ollama' });
+  await bridge.dispatch('chat.send', { text: 'Прочитай AI Map.' });
+  await bridge.ollamaTask;
+  assert.equal(bridge.state, 'idle', JSON.stringify(messages.filter(m => m.event === 'error')));
+  assert.deepEqual(native.map(m => m.method), ['scene.ai_map_read']);
+});
+
+test('Ollama cancellation discards a late tool call before it can mutate the editor', async t => {
+  let release, begin;
+  const started = new Promise(resolve => { begin = resolve; });
+  const ollamaFetch = async (url, options) => {
+    if (url.endsWith('/tags')) return installedOllamaModels();
+    if (url.endsWith('/show')) return Response.json({ capabilities: ['tools'] });
+    assert.ok(options.signal);
+    begin();
+    return new Promise(resolve => { release = resolve; });
+  };
+  const { bridge, native } = await setup(t, undefined, { ollamaFetch });
+  await bridge.dispatch('provider.select', { provider: 'ollama' });
+  await bridge.dispatch('chat.send', { text: 'Передвинь куб.' });
+  await started;
+  assert.equal((await bridge.dispatch('chat.cancel')).state, 'canceling');
+  release(toolMessage('scene_transform', { scene_session: 'scene-1', ids: ['cube-id'], translation_m: [1, 0, 0] }));
+  await bridge.ollamaTask;
+  assert.equal(bridge.state, 'interrupted');
+  assert.equal(native.length, 0);
 });

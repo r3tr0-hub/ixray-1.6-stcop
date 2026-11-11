@@ -8,7 +8,7 @@ import { ToolDefinitions, isMutationTool } from './tool-definitions.mjs';
 export { ToolDefinitions } from './tool-definitions.mjs';
 
 export function createMcpServer(editor) {
-  const server = new McpServer({ name: 'ixray-level-editor', version: '0.2.0' });
+  const server = new McpServer({ name: 'ixray-level-editor', version: '0.3.0' });
   for (const [method, description, shape] of ToolDefinitions) {
     const mutation = isMutationTool(method);
     server.registerTool(method.replaceAll('.', '_'), {

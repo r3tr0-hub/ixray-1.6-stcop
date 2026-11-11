@@ -1,4 +1,4 @@
-IX-Ray SDK — ИИ-помощник, версия 0.2.0
+IX-Ray SDK — ИИ-помощник, версия 0.3.0
 
 ОСНОВА
 Официальный SDK ixray-team/ixray-1.6-stcop, ветка develop,
@@ -106,3 +106,16 @@ https://github.com/r3tr0-hub/ixray-1.6-stcop/tree/feature/level-editor-ai
 https://developers.openai.com/codex/app-server
 https://developers.openai.com/codex/auth
 https://developers.openai.com/codex/mcp
+
+Локальный DeepSeek через Ollama
+1. Установите Ollama для Windows с https://ollama.com/download/windows и запустите его.
+2. В PowerShell выполните: ollama pull deepseek-r1:8b
+3. В панели «ИИ-помощник» выберите «Ollama · локально», затем deepseek-r1:8b.
+   Если модель скачалась при открытой панели, нажмите «Проверить подключение».
+4. Откройте тестовую сцену ai_test и запросите координаты ai_cube.
+   Затем попросите переместить объект на 1 метр по X и перечитать координаты.
+
+Ollama использует 127.0.0.1:11434. Для локальной модели ключ API и вход в ChatGPT не нужны.
+Разговор Ollama хранится в памяти на время работы панели. История Codex ведётся отдельно.
+Локальный режим поддерживает текстовые инструменты SDK. Снимки viewport доступны в Codex.
+Для расширенных операций модель может найти нужный инструмент SDK по названию или описанию.

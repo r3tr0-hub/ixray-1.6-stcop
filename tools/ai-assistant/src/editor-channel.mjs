@@ -155,23 +155,9 @@ export class LocalEditorServer extends EventEmitter {
           if (busy) { socket.write(JSON.stringify({ id: request.id, error: { code: 'BUSY', message: 'Предыдущая команда ещё выполняется.', outcome: 'not_sent' } }) + '\n'); continue; }
           busy = true;
           const controller = new AbortController(); controllers.set(request.id, controller);
-          const generation = this.cancelGeneration;
-          const changesScene = isMutationTool(request.method);
-          if (this.stopped && changesScene) {
-            busy = false; controllers.delete(request.id);
-            socket.write(JSON.stringify({ id: request.id, error: { code: 'CANCELED', message: 'Запрос отменён до выполнения.', outcome: 'canceled' } }) + '\n'); continue;
-          }
-          Promise.resolve().then(async () => {
-            if (controller.signal.aborted) throw codedError('CANCELED', 'Запрос отменён до отправки.', 'canceled');
-            if (this.beforeRequest) await this.beforeRequest(request.method, request.params, { signal: controller.signal });
-            if (changesScene && (this.stopped || generation !== this.cancelGeneration)) throw codedError('CANCELED', 'Запрос отменён до отправки в редактор.', 'canceled');
-            this.emit('operation', { method: request.method, op_id: request.params?.op_id, state: 'sent' });
-            return this.channel.request(request.method, request.params, { signal: controller.signal });
-          }).then(result => {
-            this.emit('operation', { method: request.method, op_id: request.params?.op_id, state: result?.ok === false ? 'failed' : 'completed' });
+          this.request(request.method, request.params, { signal: controller.signal }).then(result => {
             if (!socket.destroyed) socket.write(JSON.stringify({ id: request.id, result }) + '\n');
           }, error => {
-            this.emit('operation', { method: request.method, op_id: request.params?.op_id, state: error.outcome ?? 'unknown', code: error.code });
             if (!socket.destroyed) socket.write(JSON.stringify({ id: request.id, error: { code: error.code ?? 'EDITOR_ERROR', message: error.message, outcome: error.outcome } }) + '\n');
           }).finally(() => { busy = false; controllers.delete(request.id); });
         }
@@ -180,6 +166,29 @@ export class LocalEditorServer extends EventEmitter {
     await new Promise((resolve, reject) => { this.server.once('error', reject); this.server.listen(this.path, resolve); });
     if (process.platform !== 'win32') { const { chmod } = await import('node:fs/promises'); await chmod(this.path, 0o600); }
     return { path: this.path, token: this.token };
+  }
+
+  async request(method, params = {}, { signal } = {}) {
+    const generation = this.cancelGeneration;
+    const changesScene = isMutationTool(method);
+    const check = () => {
+      if (signal?.aborted || (changesScene && (this.stopped || generation !== this.cancelGeneration))) {
+        throw codedError('CANCELED', 'Запрос отменён до отправки в редактор.', 'canceled');
+      }
+    };
+    check();
+    const operation = { method, op_id: params?.op_id };
+    try {
+      await this.beforeRequest?.(method, params, { signal });
+      check();
+      this.emit('operation', { ...operation, state: 'sent' });
+      const result = await this.channel.request(method, params, { signal });
+      this.emit('operation', { ...operation, state: result?.ok === false ? 'failed' : 'completed' });
+      return result;
+    } catch (error) {
+      this.emit('operation', { ...operation, state: error.outcome ?? 'unknown', code: error.code });
+      throw error;
+    }
   }
 
   cancel() { this.cancelGeneration++; this.stopped = true; }

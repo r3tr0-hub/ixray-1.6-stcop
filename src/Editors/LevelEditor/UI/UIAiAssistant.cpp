@@ -254,6 +254,10 @@ void UIAiAssistant::Start()
 	EditorRequests.clear();
 	CancelledRequests.clear();
 	Pending.clear();
+	Provider = "codex";
+	Models = nlohmann::json::array();
+	SelectedModel.clear();
+	IsSwitchingProvider = false;
 	if (!Process.Start(Error))
 	{
 		ServerStatus = "Ошибка запуска";
@@ -263,8 +267,6 @@ void UIAiAssistant::Start()
 	ServerStatus = "Запуск…";
 	IsRejectingCommands = false;
 	Request("connection.check");
-	Request("auth.status");
-	Request("models.list");
 }
 
 void UIAiAssistant::AddMessage(const char* Role, const xr_string& Text, const xr_string& ItemId)
@@ -385,6 +387,10 @@ void UIAiAssistant::Receive(const nlohmann::json& Data)
 		{
 			Pending.erase(Iter);
 		}
+		if (Method == "provider.select")
+		{
+			IsSwitchingProvider = false;
+		}
 		if (Data.contains("error") && !Data["error"].is_null())
 		{
 			if (Method == "chat.send")
@@ -414,7 +420,7 @@ void UIAiAssistant::Receive(const nlohmann::json& Data)
 			DeviceCode.clear();
 			DeviceUrl.clear();
 		}
-		else if (Method == "models.list")
+		else if (Method == "models.list" && AiString(Result, "provider", Provider.c_str()) == Provider)
 		{
 			Models = Result.is_array() ? Result : (Result.is_object() ? Result.value("models", Result.value("data", nlohmann::json::array())) : nlohmann::json::array());
 		}
@@ -477,7 +483,7 @@ void UIAiAssistant::Receive(const nlohmann::json& Data)
 	{
 		AuthStatus = Params.contains("account") && !Params["account"].is_null() ? "Выполнен вход через ChatGPT" : "Не выполнен вход";
 	}
-	else if (Event == "chat.history")
+	else if (Event == "chat.history" && AiString(Params, "provider", Provider.c_str()) == Provider)
 	{
 		if (Params.contains("messages") && Params["messages"].is_array())
 		{
@@ -495,7 +501,14 @@ void UIAiAssistant::Receive(const nlohmann::json& Data)
 			Confirmation = nlohmann::json::object();
 		}
 	}
-	else if (Event == "models")
+	else if (Event == "provider")
+	{
+		Provider = AiString(Params, "provider", "codex");
+		SelectedModel.clear();
+		Models = nlohmann::json::array();
+		Messages.clear();
+	}
+	else if (Event == "models" && AiString(Params, "provider", Provider.c_str()) == Provider)
 	{
 		Models = Params.value("models", nlohmann::json::array());
 	}
@@ -532,24 +545,25 @@ static bool AiButton(const char* Label)
 
 void UIAiAssistant::DrawButtons()
 {
-	if (AiButton("Войти через ChatGPT"))
+	if (Provider == "codex")
 	{
-		Request("auth.login");
-	}
-	if (AiButton("Вход по коду"))
-	{
-		Request("auth.login_device");
-	}
-	if (AiButton("Выйти"))
-	{
-		IsRejectingCommands = true;
-		Request("auth.logout");
+		if (AiButton("Войти через ChatGPT"))
+		{
+			Request("auth.login");
+		}
+		if (AiButton("Вход по коду"))
+		{
+			Request("auth.login_device");
+		}
+		if (AiButton("Выйти"))
+		{
+			IsRejectingCommands = true;
+			Request("auth.logout");
+		}
 	}
 	if (AiButton("Проверить подключение"))
 	{
 		Request("connection.check");
-		Request("auth.status");
-		Request("models.list");
 	}
 	if (AiButton("Переподключить"))
 	{
@@ -572,9 +586,34 @@ void UIAiAssistant::DrawButtons()
 
 void UIAiAssistant::DrawModels()
 {
+	ImGui::BeginDisabled(IsRunningTurn || IsSwitchingProvider || !Process.IsRunning());
+	ImGui::SetNextItemWidth(-1);
+	if (ImGui::BeginCombo("##ai_provider", Provider == "ollama" ? "Ollama · локально" : "Codex · ChatGPT"))
+	{
+		for (const char* Option : {"codex", "ollama"})
+		{
+			const char* Label = xr_strcmp(Option, "ollama") == 0 ? "Ollama · локально" : "Codex · ChatGPT";
+			if (ImGui::Selectable(Label, Provider == Option) && Provider != Option)
+			{
+				IsSwitchingProvider = true;
+				Request("provider.select", {{"provider", Option}});
+			}
+		}
+		ImGui::EndCombo();
+	}
+	ImGui::EndDisabled();
 	if (!Models.is_array())
 	{
 		return;
+	}
+	bool HasSelectedModel = false;
+	for (const auto& Model : Models)
+	{
+		HasSelectedModel |= AiString(Model, "model", AiString(Model, "id").c_str()) == SelectedModel;
+	}
+	if (!HasSelectedModel)
+	{
+		SelectedModel.clear();
 	}
 	if (SelectedModel.empty())
 	{
@@ -611,13 +650,24 @@ void UIAiAssistant::Render()
 		ImGui::End();
 		return;
 	}
-	ImGui::TextWrapped("ChatGPT: %s  |  MCP: %s  |  Codex: %s", AuthStatus.c_str(), McpStatus.c_str(), ServerStatus.c_str());
+	if (Provider == "ollama")
+	{
+		ImGui::TextUnformatted("Локальный Ollama · 127.0.0.1:11434");
+	}
+	else
+	{
+		ImGui::TextWrapped("ChatGPT: %s  |  MCP: %s  |  Codex: %s", AuthStatus.c_str(), McpStatus.c_str(), ServerStatus.c_str());
+	}
 	const xr_string SceneName = AiString(SceneStatus, "scene_name", "Нет сцены");
 	const size_t SelectedCount = SceneStatus.contains("selected_count") && SceneStatus["selected_count"].is_number_integer() && SceneStatus["selected_count"].get<s64>() >= 0 ? SceneStatus["selected_count"].get<size_t>() : 0;
 	ImGui::TextWrapped("Сцена: %s  |  Выделено: %zu", SceneName.c_str(), SelectedCount);
 	DrawButtons();
 	DrawModels();
-	if (!DeviceCode.empty())
+	if (Provider == "ollama" && Models.empty())
+	{
+		ImGui::TextWrapped("Запустите Ollama, выполните ollama pull deepseek-r1:8b и проверьте подключение.");
+	}
+	if (Provider == "codex" && !DeviceCode.empty())
 	{
 		ImGui::TextWrapped("Код входа: %s\nАдрес: %s", DeviceCode.c_str(), DeviceUrl.c_str());
 		if (ImGui::SmallButton("Копировать код"))
@@ -654,7 +704,7 @@ void UIAiAssistant::Render()
 	}
 	ImGui::EndChild();
 	ImGui::InputTextMultiline("##ai_message", Input, sizeof(Input), ImVec2(-1, ImGui::GetTextLineHeightWithSpacing() * 3), ImGuiInputTextFlags_None);
-	ImGui::BeginDisabled(IsRunningTurn || Input[0] == 0 || !Process.IsRunning());
+	ImGui::BeginDisabled(IsRunningTurn || IsSwitchingProvider || Input[0] == 0 || !Process.IsRunning());
 	if (AiButton("Отправить"))
 	{
 		AddMessage("Вы", Input);
@@ -671,7 +721,7 @@ void UIAiAssistant::Render()
 		Request("chat.cancel");
 	}
 	ImGui::EndDisabled();
-	ImGui::BeginDisabled(IsRunningTurn);
+	ImGui::BeginDisabled(IsRunningTurn || IsSwitchingProvider);
 	if (AiButton("Новый диалог"))
 	{
 		Request("chat.new");

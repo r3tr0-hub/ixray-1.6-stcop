@@ -7,7 +7,7 @@
 [Setup]
 AppId={{7790FAF4-8FD9-47AF-9FF3-28DC52404648}
 AppName=IX-Ray SDK — ИИ-помощник
-AppVersion=0.2.0
+AppVersion=0.3.0
 AppPublisher=IX-Ray integration test
 DefaultDirName={localappdata}\Programs\IXRay-AI-Assistant
 DisableProgramGroupPage=yes
@@ -15,7 +15,7 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir={#Output}
-OutputBaseFilename=IXRay-AI-Assistant-0.2.0-Windows-x64-Setup
+OutputBaseFilename=IXRay-AI-Assistant-0.3.0-Windows-x64-Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

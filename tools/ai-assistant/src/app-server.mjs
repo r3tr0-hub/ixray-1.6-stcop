@@ -176,7 +176,7 @@ export class AppServerClient extends EventEmitter {
     });
     try {
       const info = await this.request('initialize', {
-        clientInfo: { name: 'ixray_level_editor', title: 'IX-Ray Level Editor', version: '0.2.0' },
+        clientInfo: { name: 'ixray_level_editor', title: 'IX-Ray Level Editor', version: '0.3.0' },
       }, { timeoutMs: this.startupTimeoutMs });
       this.notify('initialized', {});
       this.ready = true;

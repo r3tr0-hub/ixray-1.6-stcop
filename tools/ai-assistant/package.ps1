@@ -168,7 +168,7 @@ $Manifest = foreach ($File in Get-ChildItem $Stage -Recurse -File) {
     @{ path=$File.FullName.Substring($Stage.TrimEnd([IO.Path]::DirectorySeparatorChar).Length + 1).Replace('\','/'); sha256=(Get-Sha256Literal $File.FullName) }
 }
 Write-Utf8Json @($Manifest) (Join-Path $Stage 'SHA256SUMS.json')
-Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath (Join-Path $Output 'IXRay-AI-Assistant-0.2.0-Windows-x64-Portable.zip') -Force
+Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath (Join-Path $Output 'IXRay-AI-Assistant-0.3.0-Windows-x64-Portable.zip') -Force
 if (-not $SkipInstaller) {
     $ISCC = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe'
     if (-not (Test-Path $ISCC)) { throw 'Inno Setup 6 is required on the build machine only.' }
