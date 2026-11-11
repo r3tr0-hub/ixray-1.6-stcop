@@ -9,8 +9,8 @@ defaults:
   run:
     shell: pwsh
 env:
-  NATIVE_COMMIT: a8fbcc4725a4474fd4684d81aca0985d3fd4bacf
-  NATIVE_RUN_ID: '42941939771'
+  NATIVE_COMMIT: 0a348956e6baa20ba2f7b4435161aef3ccd4ddf4
+  NATIVE_RUN_ID: '43094091174'
 jobs:
   package:
     if: contains(github.event.head_commit.message, '[package-only]') && !contains(github.event.head_commit.message, '[inspect-package]') && !contains(github.event.head_commit.message, '[rollback-probe]')
@@ -58,6 +58,8 @@ jobs:
         with:
           name: IXRay-AI-Setup-${{ github.sha }}
           path: build/ai-release/*Setup.exe
+          compression-level: 0
+          overwrite: true
           if-no-files-found: warn
       - name: Upload portable package
         uses: actions/upload-artifact@v4
@@ -65,6 +67,8 @@ jobs:
         with:
           name: IXRay-AI-Portable-${{ github.sha }}
           path: build/ai-release/*Portable.zip
+          compression-level: 0
+          overwrite: true
           if-no-files-found: warn
       - name: Upload test evidence
         uses: actions/upload-artifact@v4
