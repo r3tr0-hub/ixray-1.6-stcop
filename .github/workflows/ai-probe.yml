@@ -14,6 +14,9 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 15
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
       - name: Download the coherent portable SDK
         uses: actions/download-artifact@v4
         with:
@@ -59,6 +62,7 @@ jobs:
               if ($Archives.Count -ne 1) { throw 'The probe requires exactly one portable SDK archive.' }
               Expand-Archive -LiteralPath $Archives[0].FullName -DestinationPath $SDK -Force
               $Evidence.extracted = $true
+              & ./tools/ai-assistant/prepare-standalone-assets.ps1 -Destination $SDK
               $Exe = Join-Path $SDK 'bin/LevelEditor.exe'
               $BuildInfo = Get-Content -LiteralPath (Join-Path $SDK 'build-info.json') -Raw | ConvertFrom-Json
               if ($BuildInfo.commit -ne $Evidence.nativeCommit) { throw 'Portable native source commit differs from the known complete build.' }

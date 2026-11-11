@@ -68,6 +68,7 @@ foreach ($Name in @('src','package.json','package-lock.json','runtime-lock.json'
     if (Test-Path $Source) { Copy-Item $Source (Join-Path $Assistant $Name) -Recurse }
 }
 $AssetEvidence = & (Join-Path $PSScriptRoot 'prepare-assets.ps1') -Destination $Stage -CacheDirectory $Downloads
+& (Join-Path $PSScriptRoot 'prepare-standalone-assets.ps1') -Destination $Stage
 $FixtureInstructions = Join-Path $PSScriptRoot 'fixtures/README_RU.txt'
 if (Test-Path $FixtureInstructions) {
     New-Item -ItemType Directory -Force (Join-Path $Assistant 'fixtures') | Out-Null

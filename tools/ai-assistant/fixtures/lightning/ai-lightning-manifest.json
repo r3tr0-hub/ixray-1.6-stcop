@@ -1,0 +1,48 @@
+{
+  "shader": "effects\\lightning",
+  "texture": "fx\\fx_thunderbolts_gradient",
+  "models": {
+    "gamedata/meshes/dm/dm_lightning-01.dm": {
+      "vertices": 36,
+      "indices": 96,
+      "size": 978,
+      "sha256": "45657822e00552b5e9198d9911d020160b815847ca6ead6158754c73e37ca02b"
+    },
+    "gamedata/meshes/dm/dm_lightning-02.dm": {
+      "vertices": 36,
+      "indices": 96,
+      "size": 978,
+      "sha256": "0150ef1370720dc51f9f4a20284645bcce054f21e17826732eeba023b6c9ad51"
+    },
+    "gamedata/meshes/dm/dm_lightning-03.dm": {
+      "vertices": 36,
+      "indices": 96,
+      "size": 978,
+      "sha256": "c3f77557c9bb63fc2a8d6804af59c5b6dc378e5e5bd040436773b2b9201acb7e"
+    },
+    "gamedata/meshes/dm/dm_lightning-04.dm": {
+      "vertices": 36,
+      "indices": 96,
+      "size": 978,
+      "sha256": "fcb6a8ae2854546fe3dea84369e6d089ecb2612eb979575b45d39959d9d178dc"
+    },
+    "gamedata/meshes/dm/dm_lightning_stancia_01.dm": {
+      "vertices": 36,
+      "indices": 96,
+      "size": 978,
+      "sha256": "63cde9432db025b77ff71ef878472f314dd84b323b1f89d68e8a6fb3ad674bd7"
+    },
+    "gamedata/meshes/dm/dm_lightning_stancia_02.dm": {
+      "vertices": 36,
+      "indices": 96,
+      "size": 978,
+      "sha256": "3508d9e54f2331267d8c8d175b3e4e5e509b4b7fbf1f14ee621555b2ad19e6d8"
+    },
+    "gamedata/meshes/dm/dm_lightning_stancia_03.dm": {
+      "vertices": 36,
+      "indices": 96,
+      "size": 978,
+      "sha256": "abff3efe48653dd9a2e57518dc3b97f9a3b2390fdd5fe77668f78107b816340a"
+    }
+  }
+}

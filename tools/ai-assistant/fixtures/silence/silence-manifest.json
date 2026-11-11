@@ -1,0 +1,9 @@
+{
+  "path": "gamedata/sounds/$no_sound.ogg",
+  "sha256": "b19be9bbfbf210e8e821e7632923f54160756ed131646a13df177ed8a710e858",
+  "codec": "Vorbis",
+  "sampleRate": 44100,
+  "channels": 1,
+  "durationSeconds": 0.2,
+  "generator": "ffmpeg -f lavfi -i anullsrc=r=44100:cl=mono -t 0.2 -c:a libvorbis -fflags +bitexact -flags:a +bitexact -map_metadata -1"
+}

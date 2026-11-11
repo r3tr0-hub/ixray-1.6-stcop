@@ -1,12 +1,23 @@
 ﻿[CmdletBinding()]
 param(
-    [string]$InstallationRoot = $PSScriptRoot,
+    [string]$InstallationRoot = '',
     [switch]$CheckOnly
 )
 $ErrorActionPreference = 'Stop'
 try {
-    $InstallationRoot = [IO.Path]::GetFullPath($InstallationRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
     if ($env:OS -ne 'Windows_NT') { throw 'Откат выполняется на Windows.' }
+    # Windows PowerShell 5.1 can bind a script parameter before PSScriptRoot is
+    # available. Resolve it in the body so running Rollback.ps1 directly works.
+    if ([string]::IsNullOrWhiteSpace($InstallationRoot)) {
+        $InstallationRoot = $PSScriptRoot
+        if ([string]::IsNullOrWhiteSpace($InstallationRoot) -and -not [string]::IsNullOrWhiteSpace($PSCommandPath)) {
+            $InstallationRoot = [IO.Path]::GetDirectoryName($PSCommandPath)
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($InstallationRoot)) { throw 'Не удалось определить папку установки SDK.' }
+    $RootDirectory = Get-Item -LiteralPath $InstallationRoot -ErrorAction Stop
+    if ($RootDirectory -isnot [IO.DirectoryInfo]) { throw 'Укажите существующую папку установки SDK.' }
+    $InstallationRoot = $RootDirectory.FullName
     $ProgramPrefixes = @((Join-Path $InstallationRoot 'bin'), (Join-Path $InstallationRoot 'tools/ai-assistant'))
     $Running = @(Get-CimInstance Win32_Process | Where-Object {
         $Executable = $_.ExecutablePath
@@ -79,6 +90,6 @@ try {
     Write-Host 'Сцены, ресурсы, переписка и данные входа сохранены.'
     exit 0
 } catch {
-    Write-Error $_
+    Write-Error -ErrorRecord $_ -ErrorAction Continue
     exit 1
 }
