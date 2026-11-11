@@ -408,7 +408,7 @@ void CWorldPartition::LoadLevelState(const char* PartPath)
 	CellSize = DefaultWorldPartitionCellSize;
 
 	const xr_string FileName = LevelStateFile(PartPath);
-	if (!FS.exist(FileName.c_str()))
+	if (!FS.TryLoad(FileName))
 	{
 		return;
 	}
