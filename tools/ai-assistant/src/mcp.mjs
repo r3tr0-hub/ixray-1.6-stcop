@@ -20,6 +20,15 @@ const Material = {
 };
 
 export const ToolDefinitions = [
+  ['scene.sdk_catalog', 'Поиск возможностей SDK. Выполняются записи с непустым tool. Записи COMMAND_* показывают внутренние команды без адаптера.', { ...Page, query: z.string().max(128).optional(), include_native: z.boolean().optional() }],
+  ['scene.sdk_status', 'Состояние вкладки, экспорта, компилятора и игры. Остановка процесса сама по себе не означает успех.', {}],
+  ['scene.sdk_assets', 'Поиск по библиотекам файлов SDK без изменения ресурсов. Продолжайте с next_offset.', { ...Session, ...Page, kind: z.enum(['objects', 'textures', 'texture_sources', 'texture_metadata', 'sounds', 'levels']), query: z.string().max(128).optional() }],
+  ['scene.sdk_model', 'Читает геометрию и поверхности библиотечной модели .object по её пути относительно библиотеки SDK.', { ...Session, ...Page, reference: z.string().min(1).max(200) }],
+  ['scene.sdk_run', 'Запустить штатную операцию из каталога scene_sdk_catalog. Для экспорта пользователь подтверждает штатный диалог SDK. accepted не означает, что результат проверен.', { ...Mutation, action: Id }],
+  ['scene.sdk_tab', 'Перейти в штатный редактор SDK. Возвращает активную вкладку; свойства редакторов доступны через отдельные команды.', { ...Mutation, tab: z.enum(['actor', 'shader', 'particles', 'logic', 'dialogs', 'macros', 'layout', 'level']) }],
+  ['scene.sdk_compile', 'Запустить компилятор, заданный в настройках SDK. Сцена должна быть сохранена. Состояние процесса проверяйте через scene_sdk_status, результат — по журналу компилятора.', { ...Mutation, mode: z.enum(['geometry', 'details', 'ai_high', 'ai_low', 'ai_verify', 'spawn_current', 'spawn_all']) }],
+  ['scene.object_properties', 'Читает перечень полей штатной панели свойств объекта, их типы и доступность. Основные значения находятся в object.', { ...Session, ...Page, object_id: Id }],
+  ['scene.object_edit', 'Переименовать один объект или изменить его видимость одним шагом Undo. Имя: строчные латинские буквы, цифры, дефис и подчёркивание.', { ...Mutation, object_id: Id, name: z.string().regex(/^[a-z0-9_-]{1,128}$/).optional(), visible: z.boolean().optional() }],
   ['scene.status', 'Текущая сцена, доступность редактирования, несохранённые изменения, количество объектов и выделение. Начните с этого инструмента.', Session],
   ['scene.search', 'Поиск объектов с постраничным результатом. Совместные фильтры пересекаются. texture учитывает реальные поверхности экземпляра. offset — курсор сканирования сцены: продолжайте next_offset, пока has_more=true, даже при пустой странице.', { ...Session, ...Page, name: z.string().max(255).optional(), class_id: z.number().int().nonnegative().optional(), reference: z.string().max(255).optional(), texture: z.string().max(255).optional() }],
   ['scene.selection', 'Читает выделение: непрозрачный ID, имя, класс, модель, позиция (метры), поворот (градусы), масштаб.', { ...Session, ...Page }],

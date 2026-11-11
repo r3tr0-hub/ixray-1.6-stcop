@@ -14,6 +14,7 @@ class FakeClient extends EventEmitter {
     this.calls.push({ method, params });
     if (method === 'account/read') return { account: this.signedIn ? { type: 'chatgpt', email: 'test@example.invalid', planType: 'test' } : null };
     if (method === 'model/list') return { data: [{ id: 'model-id', model: 'catalog-default', displayName: 'Official catalog model', isDefault: true }], nextCursor: null };
+    if (method === 'mcpServerStatus/list') return { data: [{ name: 'ixray', tools: { scene_status: {}, scene_transform: {} } }], nextCursor: null };
     if (method === 'thread/start') return { thread: { id: 'thread-1' } };
     if (method === 'thread/resume') return { thread: { id: params.threadId } };
     if (method === 'thread/items/list') return { data: [{ turnId: 'old-turn', item: { type: 'agentMessage', id: 'a1', text: 'Раньше был выделен куб.' } }, { turnId: 'old-turn', item: { type: 'userMessage', id: 'u1', content: [{ type: 'text', text: 'Что было выделено?' }] } }], nextCursor: null };
@@ -53,7 +54,10 @@ test('UI request reaches official client API contract; picks dynamic catalog mod
   const response = messages.find(item => item.type === 'ui.response' && item.id === 'ui-1');
   assert.equal(response.result.state, 'running');
   assert.equal(client.calls.find(item => item.method === 'turn/start').params.model, 'catalog-default');
-  assert.equal(client.calls.find(item => item.method === 'thread/start').params.sandbox, 'read-only');
+  const thread = client.calls.find(item => item.method === 'thread/start').params;
+  assert.equal(thread.sandbox, 'read-only');
+  assert.match(thread.developerInstructions, /tool_search/);
+  assert.match(thread.developerInstructions, /ixray scene_transform translation_m move object/);
   assert.match(client.options.home, /IXRay.+AI.+codex/);
   assert.equal(client.options.mcpEnv.IXRAY_EDITOR_TOKEN, bridge.local.token);
   client.emit('notification', 'item/agentMessage/delta', { threadId: 'thread-1', itemId: 'item-1', delta: 'Выделен куб.' });
@@ -200,6 +204,20 @@ test('connection check reports actual editor context and current model catalog',
   assert.equal(result.editor.scene_name, 'Тестовая сцена');
   assert.equal(native[0].method, 'scene.status');
   assert.equal(result.models[0].model, 'catalog-default');
+  assert.deepEqual(result.toolCatalog, { status: 'available', tools: ['scene_status', 'scene_transform'], transformRegistered: true });
+});
+
+test('connection check distinguishes a missing transform from an unavailable catalog', async t => {
+  const { bridge, client } = await setup(t);
+  const request = client.request.bind(client);
+  let unavailable = false;
+  client.request = (method, params, options) => {
+    if (method !== 'mcpServerStatus/list') return request(method, params, options);
+    return { data: [{ name: 'ixray', tools: { scene_status: {} }, toolsError: unavailable ? 'connection failed' : null }] };
+  };
+  assert.equal((await bridge.dispatch('connection.check')).toolCatalog.transformRegistered, false);
+  unavailable = true;
+  assert.deepEqual((await bridge.dispatch('connection.check')).toolCatalog, { status: 'unavailable' });
 });
 
 test('persisted project thread restores official paginated history in chronological order without extra transcript file', async t => {

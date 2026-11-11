@@ -3,6 +3,12 @@
 #include "MaterialCommands.h"
 #include "AiText.h"
 #include "UI/UIAiAssistant.h"
+#include "ActorEditor/UIActorEditorForm.h"
+#include "ShaderEditor/UIShaderEditorForm.h"
+#include "ParticleEditor/UIParticleEditorForm.h"
+#include "Nodes/UINodesEditorForm.h"
+#include "UI/LayoutEditor/UILayoutEditorForm.h"
+#include "UI/WorldPartition/UIWorldPartition.h"
 
 #include <chrono>
 #include <cmath>
@@ -167,14 +173,54 @@ static bool AiPage(const AiJson& Params, size_t& Offset, size_t& Limit)
 	return Limit > 0 && Limit <= 500;
 }
 
+struct AiSdkAction
+{
+	const char* Name;
+	const char* Description;
+	u32 Command;
+	u32 Argument;
+};
+
+static constexpr AiSdkAction AiSdkActions[] = {
+	{"library.open", "Open the object library in Actor Editor", COMMAND_LIBRARY_EDITOR, 0},
+	{"materials.open", "Open shared materials", COMMAND_SHARED_MATERIALS_EDITOR, 0},
+	{"textures.open", "Open Image Editor", COMMAND_IMAGE_EDITOR, 0},
+	{"textures.reload", "Reload preview textures", COMMAND_RELOAD_TEXTURES, 0},
+	{"sounds.open", "Open Sound Editor", COMMAND_SOUND_EDITOR, 0},
+	{"light_animation.open", "Open light animations", COMMAND_LANIM_EDITOR, 0},
+	{"minimap.open", "Open Minimap Editor", COMMAND_MINIMAP_EDITOR, 0},
+	{"weather.open", "Open lighting and weather properties", COMMAND_WEATHER_PROPERTIES, 0},
+	{"scene.options", "Open scene options", COMMAND_OPTIONS, 0},
+	{"scene.summary", "Collect scene summary and open its window", COMMAND_SHOW_SCENE_SUMMARY, 0},
+	{"scene.select_all", "Select all objects of the active class", COMMAND_SELECT_ALL, 0},
+	{"scene.invert_selection", "Invert selection of the active class", COMMAND_INVERT_SELECTION_ALL, 0},
+	{"scene.snap_set", "Set the snap list from the current selection", COMMAND_SET_SNAP_OBJECTS, 0},
+	{"scene.snap_add", "Append the current selection to the snap list", COMMAND_ADD_SEL_SNAP_OBJECTS, 0},
+	{"scene.snap_remove", "Remove the current selection from the snap list", COMMAND_DEL_SEL_SNAP_OBJECTS, 0},
+	{"scene.snap_clear", "Clear the snap list", COMMAND_CLEAR_SNAP_OBJECTS, 0},
+	{"scene.snap_select", "Select objects from the snap list", COMMAND_SELECT_SNAP_OBJECTS, 0},
+	{"build.make_all", "Prepare level outputs. SDK confirmation required", COMMAND_BUILD, 0},
+	{"build.make_game", "Export game data. SDK confirmation required", COMMAND_MAKE_GAME, 0},
+	{"build.make_details", "Export detail objects. SDK confirmation required", COMMAND_MAKE_DETAILS, 0},
+	{"build.make_puddles", "Export puddles. SDK confirmation required", COMMAND_MAKE_PUDDLES, 0},
+	{"build.make_planars", "Export planar reflections. SDK confirmation required", COMMAND_MAKE_PLANARS, 0},
+	{"build.make_hom", "Export HOM. SDK confirmation required", COMMAND_MAKE_HOM, 0},
+	{"build.make_som", "Export SOM. SDK confirmation required", COMMAND_MAKE_SOM, 0},
+	{"build.make_ai_map", "Export AI Map. SDK confirmation required", COMMAND_MAKE_AIMAP, 0},
+	{"build.make_ai_map_legacy", "Export legacy AI Map. SDK confirmation required", COMMAND_MAKE_AIMAP_LEGACY, 0},
+};
+
+static constexpr const char* AiSdkTabs[] = {"actor", "shader", "particles", "logic", "dialogs", "macros", "layout", "level"};
+static constexpr const char* AiCompilerModes[] = {"geometry", "details", "ai_high", "ai_low", "ai_verify", "spawn_current", "spawn_all"};
+
 static bool AiIsMutation(const xr_string& Method)
 {
-	return Method == "scene.select" || Method == "scene.focus" || Method == "scene.transform" || Method == "scene.duplicate" || Method == "scene.place" || Method == "scene.material_set" || Method == "scene.undo" || Method == "scene.redo" || Method == "scene.save_copy";
+	return Method == "scene.select" || Method == "scene.focus" || Method == "scene.transform" || Method == "scene.duplicate" || Method == "scene.place" || Method == "scene.material_set" || Method == "scene.undo" || Method == "scene.redo" || Method == "scene.save_copy" || Method == "scene.sdk_run" || Method == "scene.sdk_tab" || Method == "scene.sdk_compile" || Method == "scene.object_edit";
 }
 
 static bool AiIsSceneChange(const xr_string& Method)
 {
-	return Method == "scene.transform" || Method == "scene.duplicate" || Method == "scene.place" || Method == "scene.material_set";
+	return Method == "scene.transform" || Method == "scene.duplicate" || Method == "scene.place" || Method == "scene.material_set" || Method == "scene.object_edit";
 }
 
 AiSceneExecutor::AiSceneExecutor()
@@ -262,7 +308,7 @@ AiSceneExecutor::Json AiSceneExecutor::Describe(CCustomObject* Object)
 	Fvector Rotation = Object->GetRotation();
 	Rotation.mul(180.f / PI);
 	const char* Reference = Object->RefName();
-	return {{"id", Identify(Object).c_str()}, {"name", AiText::Utf8(Object->GetName()).c_str()}, {"class_id", Object->FClassID}, {"class_name", AiText::Utf8(Object->FParentTools->ClassName()).c_str()}, {"reference", AiText::Utf8(Reference).c_str()}, {"position_m", AiVectorJson(Object->GetPosition())}, {"rotation_degrees", AiVectorJson(Rotation)}, {"scale", AiVectorJson(Object->GetScale())}, {"selected", Object->Selected()}, {"editable", Object->Editable() && !Object->Locked() && !Object->RegionDisabled()}};
+	return {{"id", Identify(Object).c_str()}, {"name", AiText::Utf8(Object->GetName()).c_str()}, {"class_id", Object->FClassID}, {"class_name", AiText::Utf8(Object->FParentTools->ClassName()).c_str()}, {"reference", AiText::Utf8(Reference).c_str()}, {"position_m", AiVectorJson(Object->GetPosition())}, {"rotation_degrees", AiVectorJson(Rotation)}, {"scale", AiVectorJson(Object->GetScale())}, {"selected", Object->Selected()}, {"visible", Object->Visible()}, {"locked", Object->Locked()}, {"editable", Object->Editable() && !Object->Locked() && !Object->RegionDisabled()}};
 }
 
 AiSceneExecutor::Json AiSceneExecutor::Status()
@@ -457,6 +503,10 @@ AiSceneExecutor::Json AiSceneExecutor::Execute(const xr_string& Method, const Js
 	{
 		return Error("EDITOR_UNAVAILABLE", "The scene is not initialized");
 	}
+	if (Method == "scene.sdk_status")
+	{
+		return {{"ok", true}, {"active_tab", EContext.UI->ActiveTabIndex}, {"loader_busy", LUI->LoaderEvent.IsBusy()}, {"compiler_running", LTools->IsCompilerRunning()}, {"game_running", LTools->IsGameRunning()}, {"play_in_editor", Scene->IsPlayInEditor()}};
+	}
 	if (LUI->LoaderEvent.IsBusy() || Scene->locked())
 	{
 		return Error("EDITOR_BUSY", "The editor is loading, saving, or holding a scene lock; retry after it becomes idle");
@@ -470,7 +520,8 @@ AiSceneExecutor::Json AiSceneExecutor::Execute(const xr_string& Method, const Js
 	{
 		return Error("SCENE_SESSION_REQUIRED", "Query scene.status and include scene_session before changing the editor");
 	}
-	if (IsMutation && (EContext.UI->GetEState() != esEditScene || EContext.UI->ActiveTabIndex != 0 || EContext.UI->IsMouseCaptured() || !EContext.UI->IsEnableInput || Scene->IsPlayInEditor()))
+	const bool StopPlay = Method == "scene.sdk_run" && AiString(Params, "action") == "play.stop";
+	if (IsMutation && !StopPlay && (EContext.UI->GetEState() != esEditScene || (EContext.UI->ActiveTabIndex != 0 && Method != "scene.sdk_tab") || EContext.UI->IsMouseCaptured() || !EContext.UI->IsEnableInput || Scene->IsPlayInEditor()))
 	{
 		return Error("EDITOR_NOT_EDITABLE", "Open the scene tab and finish the current editing operation");
 	}
@@ -511,6 +562,334 @@ AiSceneExecutor::Json AiSceneExecutor::Execute(const xr_string& Method, const Js
 
 AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const Json& Params)
 {
+	if (Method == "scene.sdk_catalog")
+	{
+		size_t Offset, Limit;
+		if (!AiPage(Params, Offset, Limit) || (Params.contains("query") && !AiHasString(Params, "query", 128)))
+		{
+			return Error("INVALID_FILTER", "Provide a short query and valid pagination");
+		}
+		const xr_string Query = AiString(Params, "query");
+		Json Entries = Json::array();
+		size_t Matches = 0;
+		auto Add = [&](const char* Name, const char* Description, const char* Tool, const char* Action)
+		{
+			if (!AiContains(Name, Query) && !AiContains(Description, Query))
+			{
+				return;
+			}
+			if (Matches++ >= Offset && Entries.size() < Limit)
+			{
+				Entries.push_back({{"name", Name}, {"description", Description}, {"tool", Tool}, {"action", Action}});
+			}
+		};
+		for (const AiSdkAction& Action : AiSdkActions)
+		{
+			Add(Action.Name, Action.Description, "scene_sdk_run", Action.Name);
+		}
+		for (const char* Tab : AiSdkTabs)
+		{
+			Add(Tab, "Switch editor tab", "scene_sdk_tab", Tab);
+		}
+		for (const char* Mode : AiCompilerModes)
+		{
+			Add(Mode, "Run the SDK-configured compiler", "scene_sdk_compile", Mode);
+		}
+		Add("scene.validate", "Validate the level using the SDK and report its result", "scene_sdk_run", "scene.validate");
+		Add("partition.open", "Open World Partition", "scene_sdk_run", "partition.open");
+		Add("play.start", "Start Play in Editor", "scene_sdk_run", "play.start");
+		Add("play.stop", "Stop Play in Editor", "scene_sdk_run", "play.stop");
+		if (!Params.contains("include_native") || Params["include_native"] == true)
+		{
+			for (SECommand* Command : GetEditorCommands())
+			{
+				if (Command != nullptr)
+				{
+					Add(Command->Name(), AiText::Utf8(Command->Desc()).c_str(), "", "");
+				}
+			}
+		}
+		const size_t Next = std::min(Offset, Matches) + Entries.size();
+		return {{"ok", true}, {"entries", Entries}, {"total", Matches}, {"next_offset", Next}, {"has_more", Next < Matches}};
+	}
+	if (Method == "scene.sdk_assets")
+	{
+		size_t Offset, Limit;
+		if (!AiPage(Params, Offset, Limit) || (Params.contains("query") && !AiHasString(Params, "query", 128)))
+		{
+			return Error("INVALID_FILTER", "Provide a short query and valid pagination");
+		}
+		const xr_string Kind = AiString(Params, "kind");
+		const char* Alias = nullptr;
+		const char* Mask = nullptr;
+		if (Kind == "objects")
+		{
+			Alias = _objects_; Mask = "*.object";
+		}
+		else if (Kind == "textures")
+		{
+			Alias = _game_textures_; Mask = "*.dds";
+		}
+		else if (Kind == "texture_sources")
+		{
+			Alias = _textures_; Mask = "*.tga";
+		}
+		else if (Kind == "texture_metadata")
+		{
+			Alias = _textures_; Mask = "*.thm";
+		}
+		else if (Kind == "sounds")
+		{
+			Alias = _game_sounds_; Mask = "*.ogg";
+		}
+		else if (Kind == "levels")
+		{
+			Alias = _maps_; Mask = "*.level";
+		}
+		if (Alias == nullptr || !FS.path_exist(Alias))
+		{
+			return Error("ASSET_ROOT_UNAVAILABLE", "The requested SDK asset root is unavailable");
+		}
+		const xr_string Query = AiString(Params, "query");
+		FS_FileSet Files;
+		FS.file_list(Files, Alias, FS_ListFiles, Mask);
+		Json Items = Json::array();
+		size_t Matches = 0;
+		for (const FS_File& File : Files)
+		{
+			if (AiContains(File.name.c_str(), Query) && Matches++ >= Offset && Items.size() < Limit)
+			{
+				Items.push_back(AiText::Utf8(File.name.c_str()).c_str());
+			}
+		}
+		const size_t Next = std::min(Offset, Matches) + Items.size();
+		return {{"ok", true}, {"kind", Kind.c_str()}, {"items", Items}, {"total", Matches}, {"next_offset", Next}, {"has_more", Next < Matches}};
+	}
+	if (Method == "scene.sdk_model")
+	{
+		size_t Offset, Limit;
+		if (!AiPage(Params, Offset, Limit) || !AiHasString(Params, "reference", 200))
+		{
+			return Error("INVALID_PARAMS", "Provide a library .object reference and valid pagination");
+		}
+		const xr_string Reference = AiString(Params, "reference");
+		const auto RelativePath = std::filesystem::u8path(Reference.c_str());
+		if (Reference.empty() || Reference.find("..") != xr_string::npos || Reference.find(':') != xr_string::npos || RelativePath.has_root_path())
+		{
+			return Error("INVALID_REFERENCE", "Use a reference relative to the SDK object library");
+		}
+		string_path ModelPath;
+		FS.update_path(ModelPath, _objects_, EFS.ChangeFileExt(Reference, ".object").c_str());
+		if (!FS.exist(ModelPath))
+		{
+			return Error("MODEL_MISSING", "The library .object does not exist");
+		}
+		auto Release = [](CEditableObject* Object) { Lib.RemoveEditObject(Object); };
+		std::unique_ptr<CEditableObject, decltype(Release)> Model(Lib.CreateEditObject(ModelPath), Release);
+		if (!Model)
+		{
+			return Error("MODEL_LOAD_FAILED", "The SDK could not read this model");
+		}
+		auto ReadName = [](const char* Name)
+		{
+			return AiText::Utf8(Name != nullptr ? Name : "");
+		};
+		const size_t Total = Model->m_Surfaces.size();
+		size_t Cursor = std::min(Offset, Total);
+		Json Items = Json::array();
+		while (Cursor < Total && Items.size() < Limit)
+		{
+			const CSurface* Surface = Model->m_Surfaces[Cursor++];
+			Items.push_back({{"index", Cursor - 1}, {"name", ReadName(Surface->_Name()).c_str()}, {"texture", ReadName(Surface->_Texture()).c_str()}, {"render_shader", ReadName(Surface->_ShaderName()).c_str()}, {"compiler_shader", ReadName(Surface->_ShaderXRLCName()).c_str()}, {"game_material", ReadName(Surface->_GameMtlName()).c_str()}});
+		}
+		return {{"ok", true}, {"reference", Reference.c_str()}, {"faces", Model->GetFaceCount(false, false)}, {"vertices", Model->GetVertexCount()}, {"surfaces", Items}, {"total", Total}, {"next_offset", Cursor}, {"has_more", Cursor < Total}};
+	}
+	if (Method == "scene.object_properties")
+	{
+		size_t Offset, Limit;
+		if (!AiPage(Params, Offset, Limit) || !AiHasString(Params, "object_id", 128) || AiString(Params, "object_id").empty())
+		{
+			return Error("INVALID_PARAMS", "Provide one object ID and valid pagination");
+		}
+		xr_vector<CCustomObject*> Targets;
+		Json Failure;
+		if (!Resolve(Json{{"object_id", Params["object_id"]}}, Targets, Failure, false))
+		{
+			return Failure;
+		}
+		struct PropertyItems
+		{
+			PropItemVec Items;
+			~PropertyItems()
+			{
+				for (PropItem*& Item : Items)
+				{
+					xr_delete(Item);
+				}
+			}
+		} Properties;
+		CCustomObject* Object = Targets.front();
+		Object->FillProp("", Properties.Items);
+		Json Items = Json::array();
+		size_t Cursor = std::min(Offset, Properties.Items.size());
+		while (Cursor < Properties.Items.size() && Items.size() < Limit)
+		{
+			PropItem* Item = Properties.Items[Cursor++];
+			Items.push_back({{"key", AiText::Utf8(Item->Key()).c_str()}, {"type_id", Item->Type()}, {"enabled", Item->Enabled()}});
+		}
+		return {{"ok", true}, {"object", Describe(Object)}, {"properties", Items}, {"total", Properties.Items.size()}, {"next_offset", Cursor}, {"has_more", Cursor < Properties.Items.size()}};
+	}
+	if (Method == "scene.sdk_tab")
+	{
+		const xr_string Tab = AiString(Params, "tab");
+		if (Tab == "level")
+		{
+			EContext.UI->ActiveTabIndex = 0;
+		}
+		else if (Tab == "actor")
+		{
+			UIActorEditorForm::Open();
+		}
+		else if (Tab == "shader")
+		{
+			UIShaderEditorForm::Open();
+		}
+		else if (Tab == "particles")
+		{
+			UIParticleEditorForm::Open();
+		}
+		else if (Tab == "logic")
+		{
+			UINodesEditorForm::Activate(ENodesMode::Logic);
+		}
+		else if (Tab == "dialogs")
+		{
+			UINodesEditorForm::Activate(ENodesMode::Dialogs);
+		}
+		else if (Tab == "macros")
+		{
+			UINodesEditorForm::Activate(ENodesMode::Macros);
+		}
+		else if (Tab == "layout")
+		{
+			if (!UILayoutEditorForm::Open())
+			{
+				return Error("TAB_UNAVAILABLE", "The SDK could not open UI Layout Editor");
+			}
+		}
+		else
+		{
+			return Error("UNKNOWN_TAB", "Use a tab from scene_sdk_catalog");
+		}
+		return {{"ok", true}, {"requested_tab", Tab.c_str()}, {"active_tab", EContext.UI->ActiveTabIndex}};
+	}
+	if (Method == "scene.sdk_run")
+	{
+		const xr_string Name = AiString(Params, "action");
+		if (Name == "scene.validate")
+		{
+			const bool Valid = Scene->Validate(false, true, true, true, true, true);
+			return {{"ok", true}, {"valid", Valid}};
+		}
+		if (Name == "partition.open")
+		{
+			UIWorldPartition::Show();
+			return {{"ok", UIWorldPartition::IsOpen()}};
+		}
+		if (Name == "play.start")
+		{
+			if (LTools->IsCompilerRunning() || LTools->IsGameRunning())
+			{
+				return Error("SDK_BUSY", "Wait for the running compiler or game");
+			}
+			Scene->Play();
+			if (!Scene->IsPlayInEditor())
+			{
+				return Error("PLAY_START_FAILED", "Play in Editor could not start. Check the SDK log");
+			}
+			return {{"ok", true}, {"play_in_editor", true}};
+		}
+		if (Name == "play.stop")
+		{
+			if (!Scene->IsPlayInEditor())
+			{
+				return {{"ok", true}, {"play_in_editor", false}};
+			}
+			Scene->Stop();
+			return {{"ok", true}, {"status", "accepted"}, {"completion_verified", false}};
+		}
+		for (const AiSdkAction& Action : AiSdkActions)
+		{
+			if (Name != Action.Name)
+			{
+				continue;
+			}
+			if (Name.find("build.") == 0 && (LTools->IsCompilerRunning() || LTools->IsGameRunning()))
+			{
+				return Error("SDK_BUSY", "Wait for the running compiler or game");
+			}
+			if (Name == "scene.summary" && !u32(ExecCommand(COMMAND_COLLECT_SCENE_SUMMARY)))
+			{
+				return Error("SDK_COMMAND_FAILED", "The SDK could not collect the scene summary");
+			}
+			CCommandVar Result = ExecCommand(Action.Command, Action.Argument);
+			if (!Result.IsInteger() || !u32(Result))
+			{
+				return Error("SDK_COMMAND_FAILED", "The SDK declined or failed the command. Check the editor log");
+			}
+			return {{"ok", true}, {"action", Action.Name}, {"status", LUI->LoaderEvent.IsBusy() ? "running" : "accepted"}, {"completion_verified", false}};
+		}
+		return Error("UNKNOWN_SDK_ACTION", "This command has no MCP adapter");
+	}
+	if (Method == "scene.sdk_compile")
+	{
+		if (LTools->IsCompilerRunning() || LTools->IsGameRunning())
+		{
+			return Error("SDK_BUSY", "Wait for the running compiler or game");
+		}
+		if (LTools->m_LastFileName.empty() || Scene->IsUnsaved() || Scene->IsModified())
+		{
+			return Error("SAVE_REQUIRED", "Save the level before running its configured compiler");
+		}
+		const xr_string Mode = AiString(Params, "mode");
+		if (Mode == "geometry")
+		{
+			LTools->RunXrLC();
+		}
+		else if (Mode == "details")
+		{
+			LTools->RunXrDO();
+		}
+		else if (Mode == "ai_high")
+		{
+			LTools->RunXrAI_AIMap(false);
+		}
+		else if (Mode == "ai_low")
+		{
+			LTools->RunXrAI_AIMap(true);
+		}
+		else if (Mode == "ai_verify")
+		{
+			LTools->RunXrAI_Verify();
+		}
+		else if (Mode == "spawn_current")
+		{
+			LTools->RunXrAI_Spawn(true);
+		}
+		else if (Mode == "spawn_all")
+		{
+			LTools->RunXrAI_Spawn(false);
+		}
+		else
+		{
+			return Error("UNKNOWN_COMPILER_MODE", "Use a compiler mode from scene_sdk_catalog");
+		}
+		if (!LTools->IsCompilerRunning())
+		{
+			return Error("COMPILER_START_FAILED", "The configured compiler did not start. Check the SDK compiler paths and log");
+		}
+		return {{"ok", true}, {"mode", Mode.c_str()}, {"status", "running"}, {"completion_verified", false}};
+	}
 	if (Method == "scene.status")
 	{
 		return Status();
@@ -819,6 +1198,60 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 			Result["undo_steps"] = 0;
 			return Result;
 		}
+		FinishChange(Before, Result);
+		return Result;
+	}
+
+	if (Method == "scene.object_edit")
+	{
+		if (!AiHasString(Params, "object_id", 128) || AiString(Params, "object_id").empty() || Params.contains("ids"))
+		{
+			return Error("INVALID_ID", "Provide one object ID");
+		}
+		const bool Rename = Params.contains("name");
+		const bool Visibility = Params.contains("visible");
+		if ((!Rename && !Visibility) || (Visibility && !Params["visible"].is_boolean()))
+		{
+			return Error("INVALID_PARAMS", "Provide a new name or a boolean visible flag");
+		}
+		const xr_string Name = AiString(Params, "name");
+		if (Rename && (Name.empty() || Name.size() > 128 || Name.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_-") != xr_string::npos))
+		{
+			return Error("INVALID_NAME", "Use 1 to 128 lowercase ASCII letters, digits, hyphens, or underscores");
+		}
+		xr_vector<CCustomObject*> EditTargets;
+		Json EditFailure;
+		if (!Resolve(Params, EditTargets, EditFailure, true))
+		{
+			return EditFailure;
+		}
+		CCustomObject* Object = EditTargets.front();
+		if (Rename)
+		{
+			for (CCustomObject* Other : Objects())
+			{
+				if (Other != Object && Name == Other->GetName())
+				{
+					return Error("DUPLICATE_NAME", "An object already uses this name");
+				}
+			}
+		}
+		const bool NewVisibility = Visibility ? Params["visible"].get<bool>() : Object->Visible();
+		if ((!Rename || Name == Object->GetName()) && NewVisibility == Object->Visible())
+		{
+			return {{"ok", true}, {"unchanged", true}, {"object", Describe(Object)}};
+		}
+		AiSceneSnapshot Before;
+		Scene->BeforeObjectChange(Object);
+		if (Rename)
+		{
+			Object->SetName(Name.c_str());
+		}
+		if (Visibility)
+		{
+			Object->Show(NewVisibility);
+		}
+		Json Result = {{"object", Describe(Object)}};
 		FinishChange(Before, Result);
 		return Result;
 	}
