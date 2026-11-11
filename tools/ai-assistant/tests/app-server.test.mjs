@@ -4,6 +4,7 @@ import { mkdtemp, writeFile, readFile, rm, mkdir } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
+import { spawn } from 'node:child_process';
 import { AppServerClient, redactSecrets } from '../src/app-server.mjs';
 
 const fixtureSource = `#!/usr/bin/env node
@@ -51,7 +52,14 @@ async function context(t) {
   const root = await mkdtemp(path.join(tmpdir(), 'ixray app-server Кириллица '));
   const fixture = path.join(root, 'codex-app-server-fixture.mjs');
   await writeFile(fixture, fixtureSource, { mode: 0o700 });
-  const client = new AppServerClient({ requestTimeoutMs: 1000, startupTimeoutMs: 3000 });
+  const client = new AppServerClient({
+    requestTimeoutMs: 1000, startupTimeoutMs: 3000,
+    // Windows cannot execute a shebang .mjs file. Exercise the same child-process
+    // transport through an explicit Node executable on every platform.
+    spawnImpl: (command, args, options) => command === fixture
+      ? spawn(process.execPath, [fixture, ...args], options)
+      : spawn(command, args, options),
+  });
   t.after(async () => { await client.stop(); await rm(root, { recursive: true, force: true }); });
   const options = {
     codexPath: fixture, home: path.join(root, 'private codex'), cwd: root,

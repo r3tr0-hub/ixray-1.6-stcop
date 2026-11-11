@@ -51,10 +51,11 @@ function tomlString(value) {
 
 /** A private, asynchronous stdio client for the official Codex app-server. */
 export class AppServerClient extends EventEmitter {
-  constructor({ requestTimeoutMs = 120000, startupTimeoutMs = 30000 } = {}) {
+  constructor({ requestTimeoutMs = 120000, startupTimeoutMs = 30000, spawnImpl = spawn } = {}) {
     super();
     this.requestTimeoutMs = requestTimeoutMs;
     this.startupTimeoutMs = startupTimeoutMs;
+    this.spawnImpl = spawnImpl;
     this.pending = new Map();
     this.nextId = 1;
     this.child = null;
@@ -135,7 +136,7 @@ export class AppServerClient extends EventEmitter {
     const isStandalone = standalone ?? /codex-app-server/i.test(path.basename(codexPath));
     const args = isStandalone ? ['--listen', 'stdio://'] : ['app-server', '--listen', 'stdio://'];
     this.buffer = '';
-    const child = spawn(codexPath, args, {
+    const child = this.spawnImpl(codexPath, args, {
       cwd, env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
       detached: process.platform !== 'win32', shell: false,
     });
