@@ -40,7 +40,8 @@ Name: "{autoprograms}\IX-Ray SDK — откат обновления"; Filename:
 Filename: "{app}\bin\LevelEditor.exe"; Parameters: "-fsltx fs.ltx"; WorkingDir: "{app}"; Description: "Запустить Level Editor"; Flags: nowait postinstall skipifsilent
 [Code]
 var
-  ResourcePage: TInputDirWizardPage;
+  ResourcePage: TInputQueryWizardPage;
+  ResourceBrowse: TNewButton;
   UpdateInstall, UpdateStarted, InstallCompleted: Boolean;
 
 function IsOwnBuild(const Directory: String): Boolean;
@@ -85,12 +86,35 @@ begin
   Result := not UpdateInstall;
 end;
 
+procedure BrowseResourcesClick(Sender: TObject);
+var
+  Directory: String;
+begin
+  Directory := Trim(ResourcePage.Values[0]);
+  if BrowseForFolder('Выберите папку rawdata проекта', Directory, False) then
+    ResourcePage.Values[0] := Directory;
+end;
+
 procedure InitializeWizard();
 begin
-  ResourcePage := CreateInputDirPage(wpSelectDir, 'Ресурсы проекта',
+  // A directory page enforces a nonempty path internally. This optional input
+  // deliberately uses a text page and validates only a supplied resource path.
+  ResourcePage := CreateInputQueryPage(wpSelectDir, 'Ресурсы проекта',
     'При необходимости укажите папку rawdata своего проекта.',
-    'Пустое поле оставит тестовые ресурсы, а при обновлении сохранит прежний путь. Выбранная папка должна содержать objects, textures и levels. Файлы в ней не заменяются.', False, '');
-  ResourcePage.Add('Папка rawdata (необязательно):');
+    'Пустое поле оставит тестовые ресурсы, а при обновлении сохранит прежний путь. Выбранная папка должна содержать objects, textures и levels. Файлы в ней не заменяются.');
+  ResourcePage.Add('Папка rawdata (необязательно):', False);
+  ResourcePage.Values[0] := '';
+  ResourceBrowse := TNewButton.Create(WizardForm);
+  ResourceBrowse.Parent := ResourcePage.Surface;
+  ResourceBrowse.Width := ScaleX(92);
+  ResourceBrowse.Height := ScaleY(23);
+  ResourceBrowse.Left := ResourcePage.SurfaceWidth - ResourceBrowse.Width;
+  ResourceBrowse.Top := ResourcePage.Edits[0].Top - ScaleY(1);
+  ResourceBrowse.Caption := 'Обзор...';
+  ResourceBrowse.OnClick := @BrowseResourcesClick;
+  ResourceBrowse.Anchors := [akTop, akRight];
+  ResourcePage.Edits[0].Width := ResourceBrowse.Left - ResourcePage.Edits[0].Left - ScaleX(8);
+  ResourcePage.Edits[0].Anchors := [akLeft, akTop, akRight];
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -107,6 +131,8 @@ begin
       Result := False;
     end;
   end;
+  if CurPageID = ResourcePage.ID then
+    ResourcePage.Values[0] := Trim(ResourcePage.Values[0]);
   if (CurPageID = ResourcePage.ID) and (ResourcePage.Values[0] <> '') then
     if not DirExists(AddBackslash(ResourcePage.Values[0]) + 'objects') or
        not DirExists(AddBackslash(ResourcePage.Values[0]) + 'textures') or

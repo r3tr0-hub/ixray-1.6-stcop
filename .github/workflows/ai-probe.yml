@@ -1,0 +1,127 @@
+name: IXRay AI Native Portable Probe
+on:
+  push:
+    branches: [feature/level-editor-ai]
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: pwsh
+jobs:
+  probe:
+    if: contains(github.event.head_commit.message, '[probe-package]')
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - name: Download the coherent portable SDK
+        uses: actions/download-artifact@v4
+        with:
+          name: IXRay-AI-Portable-inspect8
+          run-id: '42939767904'
+          github-token: ${{ github.token }}
+          path: probe-download
+      - name: Launch real editor and inspect its scene self-test
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $EvidenceDirectory = Join-Path $env:GITHUB_WORKSPACE 'probe-evidence'
+          New-Item -ItemType Directory -Force $EvidenceDirectory | Out-Null
+          $ProbeRoot = Join-Path $env:RUNNER_TEMP ('ИИ portable probe ' + [Guid]::NewGuid().ToString('N').Substring(0,8))
+          $SDK = Join-Path $ProbeRoot 'SDK с пробелами'
+          New-Item -ItemType Directory -Force $SDK | Out-Null
+          $Evidence = [ordered]@{
+              nativeCommit='dcf188fbdff14929dfd82ee725e6fac78d54a9f1'
+              artifactRun='42939767904'
+              extracted=$false
+              launched=$false
+              nativeTestsPassed=$false
+              timedOut=$false
+              exitCode=$null
+              liveChatGPTLogin=$false
+              liveModelTurn=$false
+              errors=@()
+          }
+          $Process = $null
+          function Save-ProbeDesktop {
+              try {
+                  Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+                  $Bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+                  $Image = [System.Drawing.Bitmap]::new($Bounds.Width,$Bounds.Height)
+                  $Graphics = [System.Drawing.Graphics]::FromImage($Image)
+                  try {
+                      $Graphics.CopyFromScreen($Bounds.Location,[System.Drawing.Point]::Empty,$Bounds.Size)
+                      $Image.Save((Join-Path $EvidenceDirectory 'desktop.png'),[System.Drawing.Imaging.ImageFormat]::Png)
+                  } finally { $Graphics.Dispose(); $Image.Dispose() }
+              } catch { $Evidence.desktopCaptureError = $_.Exception.Message }
+          }
+          try {
+              $Archives = @(Get-ChildItem probe-download -Recurse -File -Filter '*Portable.zip')
+              if ($Archives.Count -ne 1) { throw 'The probe requires exactly one portable SDK archive.' }
+              Expand-Archive -LiteralPath $Archives[0].FullName -DestinationPath $SDK -Force
+              $Evidence.extracted = $true
+              $Exe = Join-Path $SDK 'bin/LevelEditor.exe'
+              $BuildInfo = Get-Content -LiteralPath (Join-Path $SDK 'build-info.json') -Raw | ConvertFrom-Json
+              if ($BuildInfo.commit -ne $Evidence.nativeCommit) { throw 'Portable native source commit differs from the known complete build.' }
+              $Manifest = @(Get-Content -LiteralPath (Join-Path $SDK 'SHA256SUMS.json') -Raw | ConvertFrom-Json)
+              $EditorHash = @($Manifest | Where-Object { $_.path -eq 'bin/LevelEditor.exe' })
+              if ($EditorHash.Count -ne 1 -or (Get-FileHash -LiteralPath $Exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne $EditorHash[0].sha256) {
+                  throw 'The portable editor does not match the package integrity manifest.'
+              }
+              $Process = Start-Process -FilePath $Exe -ArgumentList @('-ai-selftest','-ai-warp','-nosound','-fsltx','fs.ltx') -WorkingDirectory $SDK -PassThru
+              $Evidence.launched = $true
+              $Deadline = [DateTime]::UtcNow.AddSeconds(180)
+              while (-not $Process.HasExited -and [DateTime]::UtcNow -lt $Deadline) {
+                  Start-Sleep -Milliseconds 500
+                  $Process.Refresh()
+              }
+              if (-not $Process.HasExited) {
+                  $Evidence.timedOut = $true
+                  Save-ProbeDesktop
+                  Stop-Process -Id $Process.Id -Force
+                  throw 'The real Level Editor did not finish its scene self-test within 180 seconds.'
+              }
+              $Process.WaitForExit()
+              $Evidence.exitCode = $Process.ExitCode
+              $ReportPath = Join-Path $SDK '_appdata_ixray_/ai-selftest-report.json'
+              if (-not (Test-Path -LiteralPath $ReportPath)) {
+                  Save-ProbeDesktop
+                  throw "The real editor exited ($($Process.ExitCode)) without a native scene self-test report."
+              }
+              $Report = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
+              Copy-Item -LiteralPath $ReportPath -Destination (Join-Path $EvidenceDirectory 'ai-selftest-report.json')
+              Write-Host 'Native scene self-test report:'
+              Get-Content -LiteralPath $ReportPath -Raw | Write-Host
+              $Evidence.nativeReport = $Report
+              if ($Report.ok -ne $true) { throw 'The native scene self-test reported failures.' }
+              if ($Process.ExitCode -ne 0) { throw "The editor completed a report but exited with code $($Process.ExitCode)." }
+              $Evidence.nativeTestsPassed = $true
+          } catch {
+              $Evidence.errors += $_.Exception.Message
+              Write-Error $_ -ErrorAction Continue
+              throw
+          } finally {
+              if ($Process -and -not $Process.HasExited) { Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue }
+              $AppData = Join-Path $SDK '_appdata_ixray_'
+              if (Test-Path -LiteralPath $AppData) {
+                  Copy-Item -LiteralPath $AppData -Destination (Join-Path $EvidenceDirectory 'appdata') -Recurse -Force
+              }
+              $Logs = Join-Path $SDK 'logs'
+              if (Test-Path -LiteralPath $Logs) {
+                  Copy-Item -LiteralPath $Logs -Destination (Join-Path $EvidenceDirectory 'logs') -Recurse -Force
+              }
+              [IO.File]::WriteAllText((Join-Path $EvidenceDirectory 'PROBE_EVIDENCE.json'),($Evidence | ConvertTo-Json -Depth 30),[Text.UTF8Encoding]::new($false))
+              Get-ChildItem -LiteralPath $EvidenceDirectory -Recurse -File -Filter '*.log' | ForEach-Object {
+                  Write-Host "Editor log: $($_.Name)"
+                  Get-Content -LiteralPath $_.FullName -Tail 100 | Write-Host
+              }
+              Get-Content -LiteralPath (Join-Path $EvidenceDirectory 'PROBE_EVIDENCE.json') -Raw | Write-Host
+              if (Test-Path -LiteralPath $ProbeRoot) { Remove-Item -LiteralPath $ProbeRoot -Recurse -Force }
+          }
+      - name: Upload actual renderer and scene evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: IXRay-AI-Native-Probe-${{ github.sha }}
+          path: probe-evidence/**
+          if-no-files-found: warn
+          include-hidden-files: true
