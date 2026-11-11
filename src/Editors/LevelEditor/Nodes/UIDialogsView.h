@@ -67,6 +67,7 @@ public:
 	};
 
 private:
+	friend struct AiDocumentAccess;
 
 	void NewDialog(XML_NODE* RootNode);
 	void SaveDialog();

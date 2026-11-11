@@ -4,6 +4,7 @@ import { createServer, connect } from 'node:net';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { unlink } from 'node:fs/promises';
+import { isMutationTool } from './tool-definitions.mjs';
 
 export const MaxMessageBytes = 32 * 1024 * 1024;
 
@@ -155,7 +156,7 @@ export class LocalEditorServer extends EventEmitter {
           busy = true;
           const controller = new AbortController(); controllers.set(request.id, controller);
           const generation = this.cancelGeneration;
-          const changesScene = ['scene.select', 'scene.focus', 'scene.transform', 'scene.duplicate', 'scene.place', 'scene.undo', 'scene.redo', 'scene.material_set', 'scene.save_copy', 'scene.sdk_run', 'scene.sdk_tab', 'scene.sdk_compile', 'scene.object_edit'].includes(request.method);
+          const changesScene = isMutationTool(request.method);
           if (this.stopped && changesScene) {
             busy = false; controllers.delete(request.id);
             socket.write(JSON.stringify({ id: request.id, error: { code: 'CANCELED', message: 'Запрос отменён до выполнения.', outcome: 'canceled' } }) + '\n'); continue;

@@ -2,6 +2,9 @@
 #include "SceneExecutor.h"
 #include "MaterialCommands.h"
 #include "AiText.h"
+#include "AiProjectTools.h"
+#include "ContentEditorCommands.h"
+#include "DocumentCommands.h"
 #include "UI/UIAiAssistant.h"
 #include "ActorEditor/UIActorEditorForm.h"
 #include "ShaderEditor/UIShaderEditorForm.h"
@@ -213,14 +216,23 @@ static constexpr AiSdkAction AiSdkActions[] = {
 static constexpr const char* AiSdkTabs[] = {"actor", "shader", "particles", "logic", "dialogs", "macros", "layout", "level"};
 static constexpr const char* AiCompilerModes[] = {"geometry", "details", "ai_high", "ai_low", "ai_verify", "spawn_current", "spawn_all"};
 
+static bool AiIsExtendedSceneChange(const xr_string& Method)
+{
+	return Method == "scene.group_edit" || Method == "scene.way_edit" || Method == "scene.sector_edit" ||
+		Method == "scene.portal_edit" || Method == "scene.ai_map_edit" || Method == "scene.entity_set" || Method == "scene.entity_create";
+}
+
 static bool AiIsMutation(const xr_string& Method)
 {
-	return Method == "scene.select" || Method == "scene.focus" || Method == "scene.transform" || Method == "scene.duplicate" || Method == "scene.place" || Method == "scene.material_set" || Method == "scene.undo" || Method == "scene.redo" || Method == "scene.save_copy" || Method == "scene.sdk_run" || Method == "scene.sdk_tab" || Method == "scene.sdk_compile" || Method == "scene.object_edit";
+	return AiIsExtendedSceneChange(Method) || AiContentEditors::IsMutation(Method) || AiDocuments::Handles(Method) ||
+		Method == "scene.partition_edit" || Method == "scene.texture_thm_set" || Method == "scene.texture_import" ||
+		Method == "scene.dcc_export_obj" || Method == "scene.git_write" || Method == "scene.plugin_run" || Method == "scene.pack_start" ||
+		Method == "scene.select" || Method == "scene.focus" || Method == "scene.transform" || Method == "scene.duplicate" || Method == "scene.place" || Method == "scene.material_set" || Method == "scene.undo" || Method == "scene.redo" || Method == "scene.save_copy" || Method == "scene.sdk_run" || Method == "scene.sdk_tab" || Method == "scene.sdk_compile" || Method == "scene.object_edit" || Method == "scene.object_delete" || Method == "scene.level_open" || Method == "scene.level_new" || Method == "scene.level_save";
 }
 
 static bool AiIsSceneChange(const xr_string& Method)
 {
-	return Method == "scene.transform" || Method == "scene.duplicate" || Method == "scene.place" || Method == "scene.material_set" || Method == "scene.object_edit";
+	return AiIsExtendedSceneChange(Method) || Method == "scene.transform" || Method == "scene.duplicate" || Method == "scene.place" || Method == "scene.material_set" || Method == "scene.object_edit" || Method == "scene.object_delete";
 }
 
 AiSceneExecutor::AiSceneExecutor()
@@ -461,6 +473,54 @@ AiSceneExecutor::Json AiSceneExecutor::CancelOperation(const xr_string& Method, 
 	return Result;
 }
 
+static void AiRefreshOperation(AiJson& Result)
+{
+	if (Result.value("status", "") != "running")
+	{
+		return;
+	}
+	if (Result.contains("compiler_run_id"))
+	{
+		if (Result["compiler_run_id"] != LTools->GetCompilerRunId())
+		{
+			Result["status"] = "unknown";
+		}
+		else if (!LTools->IsCompilerRunning())
+		{
+			const s64 Code = LTools->GetCompilerExitCode();
+			if (Code < 0)
+			{
+				Result["status"] = "unknown";
+			}
+			else
+			{
+				Result["exit_code"] = Code;
+				Result["completion_verified"] = true;
+				Result["status"] = Code == 0 ? "completed" : "failed";
+				Result["ok"] = Code == 0;
+				if (Code != 0)
+				{
+					Result["error"] = {{"code", Result.contains("plugin_id") ? "PLUGIN_FAILED" : "COMPILER_FAILED"}, {"message", "The SDK process exited with an error"}};
+				}
+			}
+		}
+	}
+	else if (Result.contains("expected_level") && !LUI->LoaderEvent.IsBusy())
+	{
+		std::error_code Code;
+		const auto Actual = std::filesystem::u8path(LTools->m_LastFileName.c_str());
+		const auto Expected = std::filesystem::u8path(AiString(Result, "expected_level").c_str());
+		const bool Loaded = !Actual.empty() && std::filesystem::equivalent(Actual, Expected, Code) && !Code;
+		Result["status"] = Loaded ? "completed" : "failed";
+		Result["completion_verified"] = true;
+		Result["ok"] = Loaded;
+		if (!Loaded)
+		{
+			Result["error"] = {{"code", "LOAD_FAILED"}, {"message", "The editor did not load the requested level; check the SDK log"}};
+		}
+	}
+}
+
 AiSceneExecutor::Json AiSceneExecutor::Execute(const xr_string& Method, const Json& Params)
 {
 	if (!Params.is_object())
@@ -485,6 +545,7 @@ AiSceneExecutor::Json AiSceneExecutor::Execute(const xr_string& Method, const Js
 			{
 				return Error("OP_ID_COLLISION", "This operation ID was already used with different parameters");
 			}
+			AiRefreshOperation(Previous->second.Result);
 			Json Result = Previous->second.Result;
 			Result["replayed"] = true;
 			return Result;
@@ -497,7 +558,12 @@ AiSceneExecutor::Json AiSceneExecutor::Execute(const xr_string& Method, const Js
 	if (Method == "scene.operation_status")
 	{
 		auto It = Operations.find(OpId);
-		return It == Operations.end() ? Json{{"ok", true}, {"status", "unknown"}} : Json{{"ok", true}, {"status", It->second.Result.value("status", "completed")}, {"result", It->second.Result}};
+		if (It == Operations.end())
+		{
+			return {{"ok", true}, {"status", "unknown"}};
+		}
+		AiRefreshOperation(It->second.Result);
+		return {{"ok", true}, {"status", It->second.Result.value("status", "completed")}, {"result", It->second.Result}};
 	}
 	if (Scene == nullptr || EContext.UI == nullptr || !Scene->valid())
 	{
@@ -505,7 +571,7 @@ AiSceneExecutor::Json AiSceneExecutor::Execute(const xr_string& Method, const Js
 	}
 	if (Method == "scene.sdk_status")
 	{
-		return {{"ok", true}, {"active_tab", EContext.UI->ActiveTabIndex}, {"loader_busy", LUI->LoaderEvent.IsBusy()}, {"compiler_running", LTools->IsCompilerRunning()}, {"game_running", LTools->IsGameRunning()}, {"play_in_editor", Scene->IsPlayInEditor()}};
+		return {{"ok", true}, {"active_tab", EContext.UI->ActiveTabIndex}, {"loader_busy", LUI->LoaderEvent.IsBusy()}, {"compiler_running", LTools->IsCompilerRunning()}, {"compiler_run_id", LTools->GetCompilerRunId()}, {"compiler_exit_code", LTools->GetCompilerExitCode()}, {"game_running", LTools->IsGameRunning()}, {"play_in_editor", Scene->IsPlayInEditor()}};
 	}
 	if (LUI->LoaderEvent.IsBusy() || Scene->locked())
 	{
@@ -521,9 +587,13 @@ AiSceneExecutor::Json AiSceneExecutor::Execute(const xr_string& Method, const Js
 		return Error("SCENE_SESSION_REQUIRED", "Query scene.status and include scene_session before changing the editor");
 	}
 	const bool StopPlay = Method == "scene.sdk_run" && AiString(Params, "action") == "play.stop";
-	if (IsMutation && !StopPlay && (EContext.UI->GetEState() != esEditScene || (EContext.UI->ActiveTabIndex != 0 && Method != "scene.sdk_tab") || EContext.UI->IsMouseCaptured() || !EContext.UI->IsEnableInput || Scene->IsPlayInEditor()))
+	const bool AllowsOtherTab = Method == "scene.sdk_tab" || AiContentEditors::Handles(Method) || AiDocuments::Handles(Method);
+	const bool EditableTab = AllowsOtherTab
+		? (EContext.UI->GetEState() == esEditScene || EContext.UI->GetEState() == esEditCustom)
+		: (EContext.UI->GetEState() == esEditScene && EContext.UI->ActiveTabIndex == 0);
+	if (IsMutation && !StopPlay && (!EditableTab || EContext.UI->IsMouseCaptured() || !EContext.UI->IsEnableInput || Scene->IsPlayInEditor()))
 	{
-		return Error("EDITOR_NOT_EDITABLE", "Open the scene tab and finish the current editing operation");
+		return Error("EDITOR_NOT_EDITABLE", "Open the appropriate editor tab and finish the current editing operation");
 	}
 	if (AiIsSceneChange(Method) && !Scene->EnsureAssistantUndoBaseline())
 	{
@@ -560,8 +630,35 @@ AiSceneExecutor::Json AiSceneExecutor::Execute(const xr_string& Method, const Js
 	return Result;
 }
 
+#include "SceneWorldCommands.h"
+#include "SdkAutomationCommands.h"
+
 AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const Json& Params)
 {
+	if (Json Result = DispatchWorld(Method, Params); !Result.is_null())
+	{
+		return Result;
+	}
+	if (Json Result = DispatchPlugins(Method, Params); !Result.is_null())
+	{
+		return Result;
+	}
+	if (Method == "scene.entity_get" || Method == "scene.entity_set" || Method == "scene.entity_create" || Method == "scene.spawn_sections")
+	{
+		return DispatchLevelEntity(Method, Params);
+	}
+	if (AiContentEditors::Handles(Method))
+	{
+		return AiContentEditors::Execute(Method, Params);
+	}
+	if (AiDocuments::Handles(Method))
+	{
+		return AiDocuments::Dispatch(Method, Params);
+	}
+	if (auto Result = AiProjectTools::Dispatch(Method, Params))
+	{
+		return std::move(*Result);
+	}
 	if (Method == "scene.sdk_catalog")
 	{
 		size_t Offset, Limit;
@@ -847,7 +944,7 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 		{
 			return Error("SDK_BUSY", "Wait for the running compiler or game");
 		}
-		if (LTools->m_LastFileName.empty() || Scene->IsUnsaved() || Scene->IsModified())
+		if (LTools->m_LastFileName.empty() || Scene->IsUnsaved())
 		{
 			return Error("SAVE_REQUIRED", "Save the level before running its configured compiler");
 		}
@@ -888,7 +985,7 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 		{
 			return Error("COMPILER_START_FAILED", "The configured compiler did not start. Check the SDK compiler paths and log");
 		}
-		return {{"ok", true}, {"mode", Mode.c_str()}, {"status", "running"}, {"completion_verified", false}};
+		return {{"ok", true}, {"mode", Mode.c_str()}, {"status", "running"}, {"compiler_run_id", LTools->GetCompilerRunId()}, {"completion_verified", false}};
 	}
 	if (Method == "scene.status")
 	{
@@ -984,11 +1081,83 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 		return {{"ok", true}, {"undo_count", Scene->GetUndoCount()}, {"redo_count", Scene->GetRedoCount()}, {"object_ids_invalidated", true}};
 	}
 
-	if (Method == "scene.save_copy")
+	if (Method == "scene.level_open" || Method == "scene.level_new")
 	{
-		if (!AiHasString(Params, "path", 240) || AiString(Params, "path").empty())
+		if (Scene->IsUnsaved())
 		{
-			return Error("INVALID_PATH", "Specify an absolute path for a new .level copy (up to 240 UTF-8 bytes)");
+			return Error("SAVE_REQUIRED", "Save the current level before switching to another one");
+		}
+		if (LTools->IsCompilerRunning() || LTools->IsGameRunning())
+		{
+			return Error("SDK_BUSY", "Wait for the running compiler or game");
+		}
+		if (Method == "scene.level_new")
+		{
+			if (!u32(ExecCommand(COMMAND_CLEAR)) || !LTools->m_LastFileName.empty() || Scene->ObjCount() != 0)
+			{
+				return Error("CLEAR_FAILED", "The editor did not start an empty level");
+			}
+			Invalidate();
+			return Status();
+		}
+		if (!AiHasString(Params, "path", 240))
+		{
+			return Error("INVALID_PATH", "Provide the absolute path of an existing .level file");
+		}
+		const auto Path = std::filesystem::u8path(AiString(Params, "path").c_str()).lexically_normal();
+		if (!Path.is_absolute() || Path.extension() != ".level" || !AiFileWritten(Path))
+		{
+			return Error("LEVEL_MISSING", "The path must be an existing, nonempty .level file");
+		}
+		const xr_string Name = AiPathText(Path);
+		if (Name.size() > 240 || !u32(ExecCommand(COMMAND_LOAD, Name)))
+		{
+			return Error("LOAD_FAILED", "The editor did not start loading the level");
+		}
+		return {{"ok", true}, {"status", "running"}, {"expected_level", Name.c_str()}, {"completion_verified", false}};
+	}
+
+	if (Method == "scene.object_delete")
+	{
+		if (!Params.contains("ids") || !Params["ids"].is_array() || Params["ids"].empty())
+		{
+			return Error("INVALID_IDS", "Provide at least one explicit object ID");
+		}
+		xr_vector<CCustomObject*> Targets;
+		Json Failure;
+		if (!Resolve(Params, Targets, Failure, true))
+		{
+			return Failure;
+		}
+		for (CCustomObject* Target : Targets)
+		{
+			if (Target->FClassID == OBJCLASS_GROUP || Target->FClassID == OBJCLASS_SECTOR)
+			{
+				return Error("DEPENDENT_OBJECT", "Ungroup or remove sector geometry and links before using the dedicated editor operation");
+			}
+		}
+		AiSceneSnapshot Before;
+		const size_t Count = Targets.size();
+		for (CCustomObject*& Target : Targets)
+		{
+			Scene->RemoveObject(Target, false, true);
+			xr_delete(Target);
+		}
+		Json Result = {{"removed_count", Count}};
+		if (FinishChange(Before, Result))
+		{
+			Invalidate();
+		}
+		return Result;
+	}
+
+	if (Method == "scene.save_copy" || Method == "scene.level_save")
+	{
+		const bool SaveCurrent = Method == "scene.level_save";
+		if ((Params.contains("path") && (!AiHasString(Params, "path", 240) || AiString(Params, "path").empty())) ||
+			(!Params.contains("path") && (!SaveCurrent || LTools->m_LastFileName.empty())))
+		{
+			return Error("INVALID_PATH", "Specify an absolute .level path (up to 240 UTF-8 bytes)");
 		}
 		for (auto It = Scene->FirstTool(); It != Scene->LastTool(); ++It)
 		{
@@ -998,17 +1167,24 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 				return Error("COPY_HAS_UNAVAILABLE_TOOLS", "Enable and unlock all scene tools before saving a complete copy");
 			}
 		}
-		const xr_string Name = AiString(Params, "path");
-		const std::filesystem::path Target = std::filesystem::u8path(Name.c_str());
+		const std::filesystem::path Target = std::filesystem::u8path(AiString(Params, "path", LTools->m_LastFileName.c_str()).c_str()).lexically_normal();
+		const xr_string Name = AiPathText(Target);
 		std::error_code Code;
 		if (!Target.is_absolute() || Target.extension() != ".level" || !std::filesystem::is_directory(Target.parent_path(), Code) || Code)
 		{
 			return Error("INVALID_PATH", "The copy needs an absolute .level path in an existing directory");
 		}
 		const std::filesystem::path Parts = Target.parent_path() / Target.stem();
-		if (std::filesystem::exists(Target, Code) || std::filesystem::exists(Parts, Code) || Code)
+		const bool Replace = SaveCurrent && !Params.contains("path");
+		const bool TargetExists = std::filesystem::exists(Target, Code);
+		if (Code)
 		{
-			return Error("COPY_EXISTS", "The destination scene or its part directory already exists; choose a new name");
+			return Error("INVALID_PATH", "The target level cannot be inspected");
+		}
+		const bool PartsExist = std::filesystem::exists(Parts, Code);
+		if (Code || (Replace ? (!TargetExists || !PartsExist) : (TargetExists || PartsExist)))
+		{
+			return Error(Replace ? "LEVEL_MISSING" : "COPY_EXISTS", "The level and its part directory must either both exist for an in-place save or both be absent for a new file");
 		}
 		AiOwnedDirectory Staging;
 		xr_string StageLeaf = ".ixray-ai-copy-";
@@ -1061,18 +1237,94 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 				PartFiles.push_back(PartName.c_str());
 			}
 		}
-		AiOwnedDirectory FinalParts;
-		if (!FinalParts.Create(Parts))
+		if (Replace)
 		{
-			return Error("COPY_EXISTS", "The destination part directory appeared during staging; no existing files were changed");
+			const auto Backup = Staging.Path / "previous";
+			if (!std::filesystem::create_directory(Backup, Code) || Code)
+			{
+				return Error("SAVE_BACKUP_FAILED", "The backup directory could not be created");
+			}
+			const auto OldMain = Backup / Target.filename();
+			const auto OldParts = Backup / Parts.filename();
+			// Replace only generated files. Preserve any extra files in the level part directory.
+			for (std::filesystem::directory_iterator It(Parts, Code), End; !Code && It != End; It.increment(Code))
+			{
+				const auto& Entry = *It;
+				const auto Destination = StageParts / Entry.path().filename();
+				if (!std::filesystem::exists(Destination, Code) && !Code)
+				{
+					std::filesystem::copy(Entry.path(), Destination, std::filesystem::copy_options::recursive | std::filesystem::copy_options::copy_symlinks, Code);
+				}
+				if (Code)
+				{
+					break;
+				}
+			}
+			if (Code)
+			{
+				return Error("SAVE_BACKUP_FAILED", "Extra files in the part directory could not be preserved");
+			}
+			std::filesystem::rename(Target, OldMain, Code);
+			if (Code)
+			{
+				return Error("SAVE_BACKUP_FAILED", "The previous level file could not be moved");
+			}
+			std::filesystem::rename(Parts, OldParts, Code);
+			const bool MovedParts = !Code;
+			if (MovedParts)
+			{
+				std::filesystem::rename(StageParts, Parts, Code);
+			}
+			const bool InstalledParts = !Code;
+			if (InstalledParts)
+			{
+				std::filesystem::rename(StageMain, Target, Code);
+			}
+			if (Code)
+			{
+				std::error_code RestoreMain, RestoreParts, RemoveParts;
+				if (InstalledParts)
+				{
+					std::filesystem::rename(Parts, StageParts, RemoveParts);
+				}
+				if (MovedParts && !RemoveParts)
+				{
+					std::filesystem::rename(OldParts, Parts, RestoreParts);
+				}
+				std::filesystem::rename(OldMain, Target, RestoreMain);
+				if (RemoveParts || RestoreParts || RestoreMain)
+				{
+					Staging.Keep();
+					Json Result = Error("SAVE_RECOVERY_REQUIRED", "A file lock interrupted replacement and restoration");
+					Result["recovery_path"] = AiPathText(Backup).c_str();
+					return Result;
+				}
+				return Error("SAVE_COMMIT_FAILED", "The editor restored the previous level after a file replacement failed");
+			}
 		}
-		std::filesystem::copy(StageParts, Parts, std::filesystem::copy_options::recursive, Code);
-		if (Code || !std::filesystem::copy_file(StageMain, Target, std::filesystem::copy_options::none, Code) || Code)
+		else
 		{
-			return Error("COPY_COMMIT_FAILED", "The copy could not be committed without overwriting; no existing scene was replaced");
+			AiOwnedDirectory FinalParts;
+			if (!FinalParts.Create(Parts))
+			{
+				return Error("COPY_EXISTS", "The destination part directory appeared during staging");
+			}
+			std::filesystem::copy(StageParts, Parts, std::filesystem::copy_options::recursive, Code);
+			if (Code || !std::filesystem::copy_file(StageMain, Target, std::filesystem::copy_options::none, Code) || Code)
+			{
+				return Error("COPY_COMMIT_FAILED", "The level copy could not be committed");
+			}
+			FinalParts.Keep();
 		}
-		FinalParts.Keep();
-		return {{"ok", true}, {"path", Name.c_str()}, {"parts_path", AiPathText(Parts).c_str()}, {"verified_file", true}, {"verified_parts", PartFiles}, {"original_scene_kept", true}};
+		if (SaveCurrent)
+		{
+			LTools->m_LastFileName = Name;
+			Scene->full_name = Name;
+			Scene->m_RTFlags.set(EScene::flRT_Unsaved, false);
+			EPrefs->AppendRecentFile(Name.c_str());
+			EContext.UI->RedrawScene();
+		}
+		return {{"ok", true}, {"path", Name.c_str()}, {"parts_path", AiPathText(Parts).c_str()}, {"verified_file", true}, {"verified_parts", PartFiles}, {"original_scene_kept", !SaveCurrent}};
 	}
 
 	if (Method == "scene.place")
@@ -1478,3 +1730,5 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 	}
 	return Error("UNKNOWN_METHOD", "This editor command is not supported");
 }
+
+#include "LevelEntityCommands.h"

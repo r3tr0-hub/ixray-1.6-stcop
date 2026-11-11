@@ -1,4 +1,4 @@
-IX-Ray SDK — ИИ-помощник, версия 0.1.0
+IX-Ray SDK — ИИ-помощник, версия 0.2.0
 
 ОСНОВА
 Официальный SDK ixray-team/ixray-1.6-stcop, ветка develop,

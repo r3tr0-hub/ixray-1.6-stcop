@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "upstream": "https://github.com/ixray-team/ixray-1.6-stcop",
   "branch": "develop",
   "upstreamCommit": "bcf4dd51d6433fdee29ece01f7ce40af16666dec",

@@ -457,8 +457,9 @@ bool UILogicEditorForm::SaveDocument(SDocument& Document)
 	}
 
 	IWriter* Writer = FS.w_open(Document.Path.c_str());
-	if (Writer == nullptr)
+	if (Writer == nullptr || !Writer->valid())
 	{
+		FS.w_close(Writer);
 		ELog.DlgMsg(mtError, "Logic: can't write %s", Document.Path.c_str());
 		return false;
 	}

@@ -35,6 +35,7 @@ public:
 	static void DrawTopBar(float ButtonSize);
 
 private:
+	friend struct AiDocumentAccess;
 	enum class EFileKind : u8
 	{
 		Lua,
@@ -56,9 +57,11 @@ private:
 		bool Modified = false;
 		// Cached: the completion reads it every frame
 		xr_string Text;
+		xr_string SavedText;
 	};
 
 	static EFileKind GetKind(const xr_string& FullPath);
+	static xr_string ReadText(const TextEditor& View);
 
 	bool Load(SDocument& Document);
 	bool SaveDocument(SDocument& Document);

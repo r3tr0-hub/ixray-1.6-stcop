@@ -44,6 +44,7 @@ public:
 	static void DrawModeSwitch(float ButtonSize);
 
 private:
+	friend struct AiDocumentAccess;
 	INodesMode* Current() const;
 	void BuildLayout(INodesMode& Mode);
 

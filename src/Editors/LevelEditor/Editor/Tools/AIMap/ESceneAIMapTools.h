@@ -92,7 +92,7 @@ protected:
 
 	SAINode* 			BuildNode				(Fvector& vFrom, Fvector& vAt, bool bIgnoreConstraints, bool bSuperIgnoreConstraints=false);
 	int	 				BuildNodes				(const Fvector& pos, int sz, bool bIgnoreConstraints);
-	void 				BuildNodes				(bool bFromSelectedOnly);
+	bool 				BuildNodes				(bool bFromSelectedOnly);
 	bool 				CreateNode				(Fvector& vAt, SAINode& N, bool bIgnoreConstraints);
 	bool 				CanTravel				(Fvector _from, Fvector _at);
 
@@ -188,7 +188,7 @@ public:
 	virtual void		OnSynchronize			();
 
     // utils
-    bool				GenerateMap				(bool bFromSelectedOnly);
+    bool				GenerateMap				(bool bFromSelectedOnly, bool SaveUndo = true);
 	virtual bool 		GetSummaryInfo			(SSceneSummary* inf){return false;}
     virtual void		GetBBox 				(Fbox& bb, bool bSelOnly);
 

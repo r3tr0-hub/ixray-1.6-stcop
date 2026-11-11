@@ -43,6 +43,7 @@ public:
 	static bool Undo(bool Redo);
 
 private:
+	friend struct AiDocumentAccess;
 	enum class ESchemeKind : u8
 	{
 		Logic,

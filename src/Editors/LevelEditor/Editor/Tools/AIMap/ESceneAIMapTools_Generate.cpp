@@ -434,7 +434,7 @@ int ESceneAIMapTool::BuildNodes(const Fvector& pos, int sz, bool bIC)
 	return oldcount-m_Nodes.size();
 }
 
-void ESceneAIMapTool::BuildNodes(bool bFromSelectedOnly)
+bool ESceneAIMapTool::BuildNodes(bool bFromSelectedOnly)
 {
 	// begin
 	m_Nodes.reserve	(1024*1024);
@@ -449,6 +449,7 @@ void ESceneAIMapTool::BuildNodes(bool bFromSelectedOnly)
 	float estimated_nodes	= (LevelSize.x/m_Params.fPatchSize)*(LevelSize.z/m_Params.fPatchSize);
 
 	SPBItem* pb = EContext.UI->ProgressStart(1, "Building nodes...");
+	bool Completed = true;
 	// General cycle
 	for (int k=0; k<(int)m_Nodes.size(); k++){
 		SAINode* N 			= m_Nodes[k];
@@ -494,10 +495,15 @@ void ESceneAIMapTool::BuildNodes(bool bFromSelectedOnly)
 			pb->Update(p);
 			// check need abort && redraw
 			if (k%32768==0) EContext.UI->RedrawScene(false);
-			if (EContext.UI->NeedAbort()) break;
+			if (EContext.UI->NeedAbort())
+			{
+				Completed = false;
+				break;
+			}
 		}
 	}
 	EContext.UI->ProgressEnd(pb);
+	return Completed;
 }
 
 SAINode* ESceneAIMapTool::GetNode(Fvector vAt, bool bIC)	// return node's index
@@ -554,7 +560,7 @@ void ESceneAIMapTool::UpdateLinks(SAINode* N, bool bIC)
 	}
 }
 
-bool ESceneAIMapTool::GenerateMap(bool bFromSelectedOnly)
+bool ESceneAIMapTool::GenerateMap(bool bFromSelectedOnly, bool SaveUndo)
 {
 	// Streamed out objects have no geometry
 	GWorldPartition.StreamInAll();
@@ -674,7 +680,7 @@ bool ESceneAIMapTool::GenerateMap(bool bFromSelectedOnly)
 
 		CTimer tm;
 		tm.Start();
-		BuildNodes(bFromSelectedOnly);
+		const bool Completed = BuildNodes(bFromSelectedOnly);
 		tm.GetElapsed_sec();
 
 		Scene->unlock();
@@ -683,8 +689,11 @@ bool ESceneAIMapTool::GenerateMap(bool bFromSelectedOnly)
 		// unload CFModel
 		xr_delete(m_CFModel);
 
-		Scene->UndoSave();
-		bRes = true;
+		if (SaveUndo)
+		{
+			Scene->UndoSave();
+		}
+		bRes = SaveUndo || Completed;
 
 		EContext.UI->SetStatus("");
 	}

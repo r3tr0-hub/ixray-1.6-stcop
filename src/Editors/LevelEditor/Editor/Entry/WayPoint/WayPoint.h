@@ -47,6 +47,14 @@ public:
     void		Convert2Link	(CWayPoint* P);
     WPLIt		FindLink		(CWayPoint* P);
     void		GetBox			(Fbox& bb);
+
+	const char* GetName() const { return m_Name.c_str(); }
+	void SetName(const char* Name) { m_Name = Name; }
+	const Fvector& GetPosition() const { return m_vPosition; }
+	u32 GetFlags() const { return m_Flags.get(); }
+	void SetFlags(u32 Flags) { m_Flags.assign(Flags); }
+	const WPLVec& GetLinks() const { return m_Links; }
+	bool RemoveDirectedLink(CWayPoint* Point) { return DeleteLink(Point); }
 };
 
 using WPVec = xr_vector<CWayPoint*>;
@@ -85,6 +93,25 @@ public:
     CWayPoint*		GetFirstSelected();
     int 			GetSelectedPoints(WPVec& lst);
     void			RemoveSelectedPoints();
+	const WPVec& GetPoints() const { return m_WayPoints; }
+	bool RemovePoint(CWayPoint* Point)
+	{
+		const auto It = std::find(m_WayPoints.begin(), m_WayPoints.end(), Point);
+		if (m_WayPoints.size() <= 1 || It == m_WayPoints.end())
+		{
+			return false;
+		}
+		for (CWayPoint* Other : m_WayPoints)
+		{
+			if (Other != Point)
+			{
+				Other->DeleteLink(Point);
+			}
+		}
+		xr_delete(*It);
+		m_WayPoints.erase(It);
+		return true;
+	}
     void			RemoveLink		();
     void			InvertLink		();
     void			Convert1Link	();

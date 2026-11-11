@@ -899,6 +899,25 @@ void CParticleTool::SetCurrentPE(PS::CPEDef* P, EParticleAction* CurrentPA)
 	}
 }
 
+void CParticleTool::SelectEffectForEditing(PS::CPEDef& Effect, EParticleAction* Action)
+{
+	if (m_Flags.is(flUndoSave))
+	{
+		RealUndoSave();
+	}
+	StopCurrent(false);
+	ResetCurrent();
+	SetCurrentPE(&Effect, Action);
+}
+
+void CParticleTool::CommitEffectEdit()
+{
+	CompileEffect(true);
+	Modified();
+	RealUndoSave();
+	UpdateProperties();
+}
+
 void CParticleTool::SetCurrentPG(PS::CPGDef* P, PS::CPGDef::SEffect* Ef)
 {
 	VERIFY(m_bReady);

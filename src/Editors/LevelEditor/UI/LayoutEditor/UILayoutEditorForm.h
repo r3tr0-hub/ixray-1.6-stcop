@@ -39,6 +39,7 @@ public:
 	static void ShowInGame(const char* LayoutName);
 
 private:
+	friend struct AiDocumentAccess;
 	struct STextureRegion
 	{
 		xr_string File;

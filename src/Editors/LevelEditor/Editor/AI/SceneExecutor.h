@@ -21,6 +21,9 @@ private:
 		Json Result;
 	};
 
+	Json DispatchWorld(const xr_string& Method, const Json& Params);
+	Json DispatchLevelEntity(const xr_string& Method, const Json& Params);
+	Json DispatchPlugins(const xr_string& Method, const Json& Params);
 	Json Dispatch(const xr_string& Method, const Json& Params);
 	Json Error(const char* Code, const char* Message) const;
 	Json Describe(CCustomObject* Object);

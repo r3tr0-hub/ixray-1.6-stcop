@@ -2,6 +2,7 @@
 
 class ESoundSource: public CCustomObject
 {
+	friend class AiLevelEntityAccess;
 	typedef CCustomObject inherited;
 	// static sound
 	ref_sound		m_Source;

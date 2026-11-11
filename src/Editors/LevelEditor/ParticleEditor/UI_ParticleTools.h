@@ -196,6 +196,8 @@ public:
     PS::CPEDef*			FindPE				(const char* name);
     PS::CPEDef*			AppendPE			(PS::CPEDef* src, const char* path);
     void 				SetCurrentPE		(PS::CPEDef* P, EParticleAction* CurrentPA = nullptr);
+	void                SelectEffectForEditing(PS::CPEDef& Effect, EParticleAction* Action = nullptr);
+	void                CommitEffectEdit();
     void				CommandJumpToItem	();
 
     // PG routine

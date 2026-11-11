@@ -9,6 +9,7 @@ class ECORE_API EDetail: public CDetail{
 	friend class EDetailManager;
 	friend class CDetailManager;
 	friend class UIDOShuffle;
+	friend class AiLevelEntityAccess;
 
 	struct EVertexIn: public fvfVertexIn
 	{

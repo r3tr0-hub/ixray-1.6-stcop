@@ -377,16 +377,27 @@ bool UICoderForm::Load(SDocument& Document)
 	xr_string Text = Document.Utf8Bom ? xr_string(Raw.substr(3).c_str()) : Document.Utf8 ? Raw : Platform::ANSI_TO_UTF8(Raw);
 	std::erase(Text, '\r');
 
-	Document.Text = Text;
+	Document.Text = Document.SavedText = Text;
 	Document.View->SetText(Text.c_str());
 	Document.View->ClearErrorMarkers();
 	Document.Modified = false;
 	return true;
 }
 
+xr_string UICoderForm::ReadText(const TextEditor& View)
+{
+	xr_string Text = CodeEditor::GetText(View);
+	// TextEditor::GetText appends a newline for the last line, even if the file did not end in one.
+	if (!Text.empty() && Text.back() == '\n')
+	{
+		Text.pop_back();
+	}
+	return Text;
+}
+
 bool UICoderForm::SaveDocument(SDocument& Document)
 {
-	Document.Text = CodeEditor::GetText(*Document.View);
+	Document.Text = ReadText(*Document.View);
 
 	// A broken script is saved anyway, the error is marked on its line
 	Document.View->ClearErrorMarkers();
@@ -427,8 +438,9 @@ bool UICoderForm::SaveDocument(SDocument& Document)
 	}
 
 	IWriter* Writer = FS.w_open(Document.Path.c_str());
-	if (Writer == nullptr)
+	if (Writer == nullptr || !Writer->valid())
 	{
+		FS.w_close(Writer);
 		ELog.DlgMsg(mtError, "Coder: can't write %s", Document.Path.c_str());
 		return false;
 	}
@@ -450,6 +462,7 @@ bool UICoderForm::SaveDocument(SDocument& Document)
 		}
 	}
 
+	Document.SavedText = Document.Text;
 	Document.Modified = false;
 	// The hints of the Logic and Dialog editors read the functions of the scripts
 	if (Document.Kind == EFileKind::Lua)
@@ -599,8 +612,8 @@ void UICoderForm::DrawDocument(SDocument& Document)
 	const ImVec2 ViewMax = ImGui::GetItemRectMax();
 	if (View.IsTextChanged())
 	{
-		Document.Text = CodeEditor::GetText(View);
-		Document.Modified = true;
+		Document.Text = ReadText(View);
+		Document.Modified = Document.Text != Document.SavedText;
 	}
 
 	const bool Ctrl = ImGui::GetIO().ConfigMacOSXBehaviors ? ImGui::GetIO().KeySuper : ImGui::GetIO().KeyCtrl;

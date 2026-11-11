@@ -16,6 +16,7 @@ class CSHCompilerTools: public ISHTools
 
     ListItem*				m_Selected;
 public:
+	const auto& GetLibrary() const { return m_Library.Library(); }
     Shader_xrLC*			m_Shader;
     virtual void            OnRemoveItem		(UIItemListForm::Node& node); 
 	virtual void            OnRenameItem		(UIItemListForm::Node& node, const char* old_full_name, const char* new_full_name, EItemType type);

@@ -14,56 +14,64 @@ CPluginLua::CPluginLua()
 
 void CPluginLua::Run()
 {
-	lua_State* L = g_pScriptEngine->lua();
-
-	size_t ExtPos = Scene->full_name.find(".level");
-
-	if (IsSimple() && ExtPos == xr_string::npos)
-		return;
-
-	if (luaL_dofile(L, Path.c_str()))
+	xr_map<xr_string, xr_string> Arguments;
+	for (const auto& [Name, Value] : InputArgsValues)
 	{
-		Msg("Error loading plugin: %s, code: %s", Name.c_str(), lua_tostring(L, -1));
-		return;
+		Arguments[Name] = Value;
+	}
+	RunChecked(Arguments);
+}
+
+bool CPluginLua::RunChecked(const xr_map<xr_string, xr_string>& Arguments)
+{
+	lua_State* State = g_pScriptEngine ? g_pScriptEngine->lua() : nullptr;
+	const size_t Extension = Scene->full_name.rfind(".level");
+	if (State == nullptr || (Extension == xr_string::npos && (IsSimple() || InputArgsName.contains("level"))))
+	{
+		return false;
 	}
 
-	lua_getglobal(L, "main");
-
-	if (!lua_isfunction(L, -1))
+	const int Base = lua_gettop(State);
+	lua_pushnil(State);
+	lua_setglobal(State, "main");
+	if (luaL_dofile(State, Path.c_str()) != 0)
 	{
-		Msg("Error loading entry function 'main' in %s", Name.c_str());
-		return;
+		Msg("! Error loading plugin %s: %s", Name.c_str(), lua_tostring(State, -1));
+		lua_settop(State, Base);
+		return false;
+	}
+	lua_getglobal(State, "main");
+	if (!lua_isfunction(State, -1))
+	{
+		Msg("! Missing plugin entry function main in %s", Name.c_str());
+		lua_settop(State, Base);
+		return false;
 	}
 
+	const xr_string LevelDirectory = Extension == xr_string::npos ? "" : Scene->full_name.substr(0, Extension) + "\\";
+	int Count = 0;
 	if (IsSimple())
 	{
-		xr_string LevelDir = Scene->full_name.substr(0, ExtPos) + "\\";
-		lua_pushstring(L, LevelDir.c_str());
-
-		lua_pcall(L, 1, 1, 0);
+		lua_pushstring(State, LevelDirectory.c_str());
+		Count = 1;
 	}
 	else
 	{
-		for (auto& [Arg, Value] : InputArgsValues)
+		for (const auto& [Key, Description] : InputArgsName)
 		{
-			if (Arg == "level")
-			{
-				xr_string LevelDir = Scene->full_name.substr(0, ExtPos) + "\\";
-				lua_pushstring(L, LevelDir.c_str());
-			}
-			else
-			{
-				lua_pushstring(L, Value);
-			}
-		}
-
-		if (lua_pcall(L, InputArgsValues.size(), 1, 0))
-		{
-			Msg("! %s", lua_tostring(L, -1));
+			const auto Value = Arguments.find(Key);
+			lua_pushstring(State, Key == "level" ? LevelDirectory.c_str() : (Value != Arguments.end() ? Value->second.c_str() : ""));
+			Count++;
 		}
 	}
 
-	lua_pop(L, 1);
+	const bool Success = lua_pcall(State, Count, 0, 0) == 0;
+	if (!Success)
+	{
+		Msg("! Plugin %s failed: %s", Name.c_str(), lua_tostring(State, -1));
+	}
+	lua_settop(State, Base);
+	return Success;
 }
 
 xr_string CPluginLua::ReadDesc() const

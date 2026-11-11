@@ -29,6 +29,8 @@ public:
     void GetTransform(Fmatrix& parent);
     bool IsItem		(const char* O, const char* M);
     IC CSceneObject* GetSceneObject() const { return object; }
+	const char* GetMeshName() const { return MeshName.c_str(); }
+	const char* GetStoredObjectName() const { return ObjectName.c_str(); }
     IC bool IsItem(CSceneObject* o, CEditableMesh* m) const { return (o == object) && (m == mesh); }
     IC bool IsItem(const CSectorItem& Item) const { return (Item.object == object) && (Item.mesh == mesh); }
 };

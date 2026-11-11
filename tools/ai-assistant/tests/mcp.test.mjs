@@ -32,6 +32,17 @@ test('MCP rejects invalid/missing operation identity and finite vector violation
   assert.equal(valid.isError, false); assert.equal(calls, 1);
 });
 
+test('SDK editor operations use typed native calls and mutation identity', async t => {
+  const calls = [];
+  const client = await connected(t, async (method, args) => { calls.push({ method, args }); return { ok: true }; });
+  const edit = { scene_session: 'scene-1', op_id: 'operation-2', action: 'set', name: 'rain', action_index: 0, fields: { rate: 12.5 } };
+  assert.equal((await client.callTool({ name: 'scene_particle_edit', arguments: edit })).isError, false);
+  assert.deepEqual(calls, [{ method: 'scene.particle_edit', args: edit }]);
+  assert.equal((await client.callTool({ name: 'scene_particle_edit', arguments: { ...edit, op_id: undefined } })).isError, true);
+  assert.equal((await client.callTool({ name: 'scene_entity_set', arguments: { ...edit, changes: { unsupported: true } } })).isError, true);
+  assert.equal(calls.length, 1);
+});
+
 test('viewport returns supported image content plus scene provenance', async t => {
   const client = await connected(t, async () => ({ ok: true, scene_session: 'scene-1', revision: 4, mime_type: 'image/png', data: 'iVBORw0KGgo=' }));
   const result = await client.callTool({ name: 'scene_viewport', arguments: {} });

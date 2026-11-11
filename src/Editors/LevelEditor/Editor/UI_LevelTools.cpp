@@ -497,13 +497,16 @@ void CLevelTool::OnFrame()
 		if (GetExitCodeProcess(m_CompilerProcess.hProcess, &ExitCode) == 0)
 		{
 			Msg("! Cannot return exit code in compiler process (%d).\n", GetLastError());
-			m_CompilerProcess.hProcess = 0;
+			CloseHandle(m_CompilerProcess.hProcess);
+			CloseHandle(m_CompilerProcess.hThread);
+			m_CompilerProcess = {};
 
 		}
 		else
 		{
 			if (ExitCode != STILL_ACTIVE)
 			{
+				CompilerExitCode = ExitCode;
 				CloseHandle(m_CompilerProcess.hProcess);
 				CloseHandle(m_CompilerProcess.hThread);
 				m_CompilerProcess.hProcess = 0;
@@ -864,6 +867,8 @@ void CLevelTool::RunXrLC()
 		Msg("! XrLC:CreateProcess failed (%d).\n", GetLastError());
 		return;
 	}
+	CompilerRunId++;
+	CompilerExitCode = -1;
 }
 void CLevelTool::RunXrDO()
 {
@@ -907,6 +912,8 @@ void CLevelTool::RunXrDO()
 		Msg("! xrDO_light:CreateProcess failed (%d).\n", GetLastError());
 		return;
 	}
+	CompilerRunId++;
+	CompilerExitCode = -1;
 }
 void CLevelTool::RunXrAI_Spawn(bool current_level)
 {
@@ -950,6 +957,8 @@ void CLevelTool::RunXrAI_Spawn(bool current_level)
 		Msg("! xrAI:CreateProcess failed (%d).\n", GetLastError());
 		return;
 	}
+	CompilerRunId++;
+	CompilerExitCode = -1;
 }
 void CLevelTool::RunXrAI_AIMap(bool draw)
 {
@@ -994,6 +1003,8 @@ void CLevelTool::RunXrAI_AIMap(bool draw)
 		Msg("! xrAI:CreateProcess failed (%d).\n", GetLastError());
 		return;
 	}
+	CompilerRunId++;
+	CompilerExitCode = -1;
 }
 void CLevelTool::RunXrAI_Verify()
 {
@@ -1038,7 +1049,32 @@ void CLevelTool::RunXrAI_Verify()
 		Msg("! xrAI:CreateProcess failed (%d).\n", GetLastError());
 		return;
 	}
+	CompilerRunId++;
+	CompilerExitCode = -1;
 }
+
+#ifdef IXR_WINDOWS
+bool CLevelTool::RunAssistantProcess(const wchar_t* Executable, wchar_t* CommandLine, const wchar_t* WorkingDirectory)
+{
+	if (IsCompilerRunning() || IsGameRunning())
+	{
+		return false;
+	}
+
+	STARTUPINFOW Startup = {};
+	Startup.cb = sizeof(Startup);
+	m_CompilerProcess = {};
+	if (!CreateProcessW(Executable, CommandLine, nullptr, nullptr, false, 0, nullptr, WorkingDirectory, &Startup, &m_CompilerProcess))
+	{
+		Msg("! Cannot launch assistant SDK tool (%d).\n", GetLastError());
+		return false;
+	}
+
+	CompilerRunId++;
+	CompilerExitCode = -1;
+	return true;
+}
+#endif
 
 bool CLevelTool::IsCompilerRunning()
 {

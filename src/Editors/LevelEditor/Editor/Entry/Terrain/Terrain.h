@@ -4,6 +4,7 @@
 class CTerrain :
 	public CCustomObject
 {
+	friend class AiLevelEntityAccess;
 	typedef CCustomObject inherited;
 	friend class ESceneTerrainTool;
 

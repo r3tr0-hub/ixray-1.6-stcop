@@ -29,6 +29,7 @@ public:
 	void Exec();
 
 private:
+	friend struct AiDocumentAccess;
 	struct SCommand
 	{
 		xr_string Name;

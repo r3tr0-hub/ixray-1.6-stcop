@@ -1,6 +1,8 @@
 #include "stdafx.h"
 #include "AiSelfTest.h"
 #include "SceneExecutor.h"
+#include "AiProjectTools.h"
+#include "DocumentCommandsSelfTest.h"
 
 #include <chrono>
 #include <filesystem>
@@ -354,6 +356,41 @@ private:
 				Check("sdk_object_rename_undo", IsOk(Call("scene.undo", Json::object(), true)) && !String(Cube(), "id").empty());
 				const Json Unknown = Call("scene.sdk_run", {{"action", "COMMAND_EXIT"}}, true);
 				Check("sdk_action_rejects_unmapped_commands", !IsOk(Unknown), Unknown);
+				break;
+			}
+			case 13:
+			{
+				const Json Light = Call("scene.entity_create", {{"kind", "light"}, {"name", "ai_test_light"}, {"position_m", {2, 3, 4}}}, true);
+				const Json Id = Light.value("created", Json::object()).value("id", Json());
+				Check("sdk_create_light", IsOk(Light) && Id.is_string(), Light);
+				if (IsOk(Light) && Id.is_string())
+				{
+					const Json Edit = Call("scene.entity_set", {{"object_id", Id}, {"changes", {{"brightness", 1.5}, {"range_m", 12.0}}}}, true);
+					Check("sdk_edit_light", IsOk(Edit), Edit);
+					const Json Read = Call("scene.entity_get", {{"object_id", Id}});
+					Check("sdk_read_edited_light", IsOk(Read) && Read.value("details", Json::object()).value("brightness", 0.0) == 1.5, Read);
+				}
+				const Json Partition = Call("scene.partition_read");
+				Check("sdk_world_partition_status", IsOk(Partition) && Partition.value("cell_size_m", 0.0) > 0, Partition);
+				const Json Way = Call("scene.way_edit", {{"action", "create"}, {"name", "ai_test_way"}, {"position_m", {0, 0, 0}}}, true);
+				Check("sdk_create_waypoint", IsOk(Way), Way);
+				break;
+			}
+			case 14:
+			{
+				const Json Metadata = AiProjectTools::SelfTestMetadata(RunDirectory);
+				Check("sdk_texture_metadata_round_trip", IsOk(Metadata), Metadata);
+				const Json Pack = Call("scene.pack_start", {{"folder", "../escape"}}, true);
+				Check("sdk_pack_rejects_path_traversal", !IsOk(Pack), Pack);
+				const Json PackStatus = Call("scene.pack_status");
+				Check("sdk_pack_reads_status", IsOk(PackStatus), PackStatus);
+				break;
+			}
+			case 15:
+			{
+				AiDocuments::SmokeTest(StartedAt,
+					[this](const char* Method, Json Params, bool Mutation) { return Call(Method, std::move(Params), Mutation); },
+					[this](const char* Name, bool Passed, Json Details) { Check(Name, Passed, std::move(Details)); });
 				break;
 			}
 			default:

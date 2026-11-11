@@ -15,6 +15,8 @@ class CLevelTool: public CToolCustom
 
 	PROCESS_INFORMATION m_CompilerProcess = {};
 	PROCESS_INFORMATION m_GameProcess = {};
+	u64 CompilerRunId = 0;
+	s64 CompilerExitCode = -1;
 	UIToolCustom*           m_ToolForm;
 	int             sub_target;
 	ObjClassID		target;
@@ -160,7 +162,12 @@ public:
 	void RunXrAI_Spawn(bool current_level);
 	void RunXrAI_AIMap(bool draw);
 	void RunXrAI_Verify();
+#ifdef IXR_WINDOWS
+	bool RunAssistantProcess(const wchar_t* Executable, wchar_t* CommandLine, const wchar_t* WorkingDirectory);
+#endif
 	bool IsCompilerRunning();
+	u64 GetCompilerRunId() const { return CompilerRunId; }
+	s64 GetCompilerExitCode() const { return CompilerExitCode; }
 	bool IsGameRunning();
 	void Terminated();
 
