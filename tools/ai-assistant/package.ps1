@@ -2,11 +2,25 @@
 param(
     [string]$Output = '',
     [string]$BinaryDirectory = '',
+    [string]$NativeCommit = 'HEAD',
     [switch]$SkipInstaller
 )
 $ErrorActionPreference = 'Stop'
 if ($env:OS -ne 'Windows_NT') { throw 'Packaging requires Windows x64.' }
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
+$IntegrationCommit = (& git -C $Root rev-parse --verify HEAD).Trim()
+if ($LASTEXITCODE) { throw 'Unable to resolve the integration source commit.' }
+$ResolvedNativeCommit = & git -C $Root rev-parse --verify --end-of-options "$NativeCommit^{commit}"
+if ($LASTEXITCODE -or -not $ResolvedNativeCommit) { throw "Unable to resolve native source commit: $NativeCommit" }
+$NativeCommit = ($ResolvedNativeCommit -join '').Trim()
+# An existing complete native artifact can be repackaged only when all native
+# sources, build definitions, SDK files and resource inputs match its commit.
+$NativePaths = @('src','cmake','sdk','CMake*.json','CMake*.txt','fs*.ltx','gamedata','rawdata')
+$ChangedNativeFiles = @(& git -C $Root diff --name-only $NativeCommit $IntegrationCommit -- @NativePaths)
+if ($LASTEXITCODE) { throw 'Unable to verify native artifact source compatibility.' }
+if ($ChangedNativeFiles.Count) {
+    throw ("Native artifact source mismatch between $NativeCommit and $IntegrationCommit. Rebuild the complete native set. Changed files: " + ($ChangedNativeFiles -join ', '))
+}
 $Lock = Get-Content (Join-Path $PSScriptRoot 'runtime-lock.json') -Raw | ConvertFrom-Json
 if (-not $Output) { $Output = Join-Path $Root 'build/ai-release' }
 if (-not $BinaryDirectory) { $BinaryDirectory = Join-Path $Root 'build/x64/Editors-Windows/bin/Release' }
@@ -101,19 +115,31 @@ if (Test-Path $Smoke) {
 $CrtFound = $false
 $VsWhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
 if (Test-Path $VsWhere) {
-    $VS = & $VsWhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    $VS = & $VsWhere -version '[17.0,18.0)' -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
     if ($VS) {
-        $CrtVersion = Get-ChildItem (Join-Path $VS 'VC/Redist/MSVC') -Directory | Sort-Object Name -Descending | Select-Object -First 1
-        if ($CrtVersion) {
-            $CRT = Join-Path $CrtVersion.FullName 'x64/Microsoft.VC143.CRT'
-            if (Test-Path $CRT) {
+        $RedistRoot = Join-Path ($VS -join '').Trim() 'VC/Redist/MSVC'
+        if (Test-Path $RedistRoot) {
+            $CrtCandidates = @(Get-ChildItem $RedistRoot -Recurse -File -Filter 'vcruntime140.dll' | Where-Object {
+                $_.DirectoryName -match '[\\/]x64[\\/]Microsoft[.]VC[^\\/]*[.]CRT$' -and
+                $_.DirectoryName -notmatch '[\\/]onecore[\\/]' -and
+                (Test-Path (Join-Path $_.DirectoryName 'msvcp140.dll'))
+            } | ForEach-Object {
+                $Version = $_.VersionInfo
+                [pscustomobject]@{
+                    Directory = $_.DirectoryName
+                    Version = [Version]::new($Version.FileMajorPart, $Version.FileMinorPart, $Version.FileBuildPart, $Version.FilePrivatePart)
+                }
+            } | Sort-Object Version -Descending)
+            if ($CrtCandidates.Count) {
+                $CRT = $CrtCandidates[0].Directory
+                Write-Host "Using coherent Visual Studio 2022 x64 CRT: $CRT"
                 Copy-Item (Join-Path $CRT '*.dll') (Join-Path $Stage 'bin')
                 $CrtFound = (Test-Path (Join-Path $Stage 'bin/vcruntime140.dll')) -and (Test-Path (Join-Path $Stage 'bin/msvcp140.dll'))
             }
         }
     }
 }
-if (-not $CrtFound) { throw 'App-local Microsoft VC143 x64 runtime is missing; install the Visual Studio 2022 C++ redist build component before packaging.' }
+if (-not $CrtFound) { throw 'App-local Microsoft VC x64 runtime is missing; install the Visual Studio 2022 C++ redist build component before packaging.' }
 # Each standalone child executable must resolve its own runtime on a clean PC.
 $RuntimeDirectories = @(Get-ChildItem $Runtime -Recurse -File -Filter '*.exe' | ForEach-Object DirectoryName | Sort-Object -Unique)
 foreach ($Directory in $RuntimeDirectories) {
@@ -125,8 +151,7 @@ foreach ($Directory in $RuntimeDirectories) {
 foreach ($Name in @('Launch-LevelEditor.cmd','Rollback.cmd','Rollback.ps1')) {
     Copy-Item (Join-Path $PSScriptRoot $Name) $Stage
 }
-$Commit = (& git -C $Root rev-parse HEAD).Trim()
-Write-Utf8Json @{ product='IXRay-AI-Assistant'; compatibilityLine='develop'; version=$Lock.version; upstream=$Lock.upstreamCommit; commit=$Commit; configuration='Release'; platform='Windows x64'; builtAt=[DateTime]::UtcNow.ToString('o'); node=$Lock.node.version; codex=$Lock.codex.version } (Join-Path $Stage 'build-info.json')
+Write-Utf8Json @{ product='IXRay-AI-Assistant'; compatibilityLine='develop'; version=$Lock.version; upstream=$Lock.upstreamCommit; commit=$NativeCommit; integrationCommit=$IntegrationCommit; configuration='Release'; platform='Windows x64'; builtAt=[DateTime]::UtcNow.ToString('o'); node=$Lock.node.version; codex=$Lock.codex.version } (Join-Path $Stage 'build-info.json')
 $Manifest = foreach ($File in Get-ChildItem $Stage -Recurse -File) {
     @{ path=$File.FullName.Substring($Stage.TrimEnd([IO.Path]::DirectorySeparatorChar).Length + 1).Replace('\','/'); sha256=(Get-FileHash $File.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
 }

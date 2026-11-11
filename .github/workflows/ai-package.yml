@@ -1,0 +1,60 @@
+name: IXRay AI Package Verification
+on:
+  push:
+    branches: [feature/level-editor-ai]
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: pwsh
+env:
+  NATIVE_COMMIT: dcf188fbdff14929dfd82ee725e6fac78d54a9f1
+  NATIVE_RUN_ID: '42934583041'
+jobs:
+  package:
+    if: contains(github.event.head_commit.message, '[package-only]')
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify unchanged SDK source
+        run: |
+          git diff --exit-code $env:NATIVE_COMMIT HEAD -- src cmake sdk CMakeLists.txt CMakePresets.json CMakeSettings.json NuGet.config gamedata rawdata fs.ltx fsfactory.ltx fsgame.ltx
+          if ($LASTEXITCODE) { throw 'SDK source differs from the built revision; a full native rebuild is required.' }
+      - name: Download coherent native Release binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: ixray-ai-build-evidence-dcf188fbdff14929dfd82ee725e6fac78d54a9f1
+          run-id: ${{ env.NATIVE_RUN_ID }}
+          github-token: ${{ github.token }}
+          path: build/reused-native
+      - name: Restore test assets
+        run: Copy-Item tools/ai-assistant/fixtures/content/* ./ -Recurse -Force
+      - uses: actions/cache@v4
+        with:
+          path: build/ai-release/downloads
+          key: ixray-ai-runtime-${{ hashFiles('tools/ai-assistant/runtime-lock.json') }}
+      - name: Package and test official runtimes
+        run: |
+          $Editors = @(Get-ChildItem build/reused-native -Recurse -File -Filter 'LevelEditor.exe')
+          if ($Editors.Count -ne 1) { throw 'The artifact must contain exactly one complete editor binary set.' }
+          ./tools/ai-assistant/package.ps1 -BinaryDirectory $Editors[0].DirectoryName -NativeCommit $env:NATIVE_COMMIT
+      - name: Verify installed editor, scene operations and rollback
+        run: ./tools/ai-assistant/verify-package.ps1
+      - name: Upload installer, portable package and evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: IXRay-AI-Assistant-Windows-x64-${{ github.sha }}
+          path: |
+            build/ai-release/*Setup.exe
+            build/ai-release/*Portable.zip
+            build/ai-release/IXRay-AI-Assistant/build-info.json
+            build/ai-release/IXRay-AI-Assistant/SHA256SUMS.json
+            build/ai-release/CI_EVIDENCE.json
+            build/ai-release/ai-selftest-report.json
+            build/ai-release/installed-test-evidence/**
+          if-no-files-found: warn

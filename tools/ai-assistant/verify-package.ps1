@@ -22,6 +22,9 @@ try {
     $Evidence.install = $true
     $Exe = Join-Path $Installation 'bin/LevelEditor.exe'
     if (-not (Test-Path $Exe)) { throw 'Installed LevelEditor.exe is missing.' }
+    $BuildInfo = Get-Content (Join-Path $Installation 'build-info.json') -Raw | ConvertFrom-Json
+    $Evidence.nativeCommit = $BuildInfo.commit
+    $Evidence.integrationCommit = $BuildInfo.integrationCommit
     $Process = Start-Process -FilePath $Exe -ArgumentList @('-ai-selftest','-ai-warp','-nosound','-fsltx','fs.ltx') -WorkingDirectory $Installation -PassThru
     $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while (-not $Process.HasExited -and [DateTime]::UtcNow -lt $Deadline) {

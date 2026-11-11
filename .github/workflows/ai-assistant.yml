@@ -13,6 +13,7 @@ defaults:
     shell: pwsh
 jobs:
   windows:
+    if: "!contains(github.event.head_commit.message, '[package-only]')"
     runs-on: windows-2022
     timeout-minutes: 100
     steps:
