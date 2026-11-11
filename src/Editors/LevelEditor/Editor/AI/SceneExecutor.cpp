@@ -1,0 +1,831 @@
+#include "stdafx.h"
+#include "SceneExecutor.h"
+#include "MaterialCommands.h"
+#include "UI/UIAiAssistant.h"
+
+#include <chrono>
+#include <cmath>
+#include <filesystem>
+#include <fstream>
+
+using AiJson = nlohmann::json;
+
+class AiSceneSnapshot final
+{
+public:
+	AiSceneSnapshot() : Flags(Scene->m_RTFlags)
+	{
+		Scene->CaptureUndoState(Parts);
+	}
+
+	void Restore() const
+	{
+		Scene->RestoreAssistantState(Parts);
+		Scene->m_RTFlags = Flags;
+		EContext.UI->UpdateScene();
+		EContext.UI->RedrawScene();
+	}
+
+	CUndoJournal::State Parts;
+	Flags32 Flags;
+};
+
+static bool AiHasString(const AiJson& Data, const char* Key, size_t Max = 1024)
+{
+	auto It = Data.find(Key);
+	return It != Data.end() && It->is_string() && It->get_ref<const AiJson::string_t&>().size() <= Max;
+}
+
+static xr_string AiString(const AiJson& Data, const char* Key, const char* Default = "")
+{
+	auto It = Data.find(Key);
+	return It != Data.end() && It->is_string() ? xr_string(It->get_ref<const AiJson::string_t&>().c_str()) : xr_string(Default);
+}
+
+static bool AiVector(const AiJson& Data, const char* Key, Fvector& Value, float Default, float Bound)
+{
+	Value.set(Default, Default, Default);
+	auto It = Data.find(Key);
+	if (It == Data.end())
+	{
+		return true;
+	}
+	if (!It->is_array() || It->size() != 3)
+	{
+		return false;
+	}
+	for (size_t Index = 0; Index < 3; Index++)
+	{
+		if (!(*It)[Index].is_number())
+		{
+			return false;
+		}
+		double Number = (*It)[Index].get<double>();
+		if (!std::isfinite(Number) || std::abs(Number) > Bound)
+		{
+			return false;
+		}
+		Value[(int)Index] = (float)Number;
+	}
+	return true;
+}
+
+static AiJson AiVectorJson(const Fvector& Value)
+{
+	return AiJson::array({Value.x, Value.y, Value.z});
+}
+
+static bool AiPage(const AiJson& Params, size_t& Offset, size_t& Limit)
+{
+	Offset = 0;
+	Limit = 100;
+	for (const char* Key : {"offset", "limit"})
+	{
+		auto It = Params.find(Key);
+		if (It == Params.end())
+		{
+			continue;
+		}
+		if (!It->is_number_integer() || It->get<double>() < 0 || It->get<double>() > 100000000)
+		{
+			return false;
+		}
+		if (xr_strcmp(Key, "offset") == 0)
+		{
+			Offset = It->get<size_t>();
+		}
+		else
+		{
+			Limit = It->get<size_t>();
+		}
+	}
+	return Limit > 0 && Limit <= 500;
+}
+
+static bool AiIsMutation(const xr_string& Method)
+{
+	return Method == "scene.select" || Method == "scene.focus" || Method == "scene.transform" || Method == "scene.duplicate" || Method == "scene.place" || Method == "scene.material_set" || Method == "scene.undo" || Method == "scene.redo" || Method == "scene.save_copy";
+}
+
+static bool AiIsSceneChange(const xr_string& Method)
+{
+	return Method == "scene.transform" || Method == "scene.duplicate" || Method == "scene.place" || Method == "scene.material_set";
+}
+
+AiSceneExecutor::AiSceneExecutor()
+{
+	Generation = (u64)std::chrono::steady_clock::now().time_since_epoch().count();
+	Invalidate();
+}
+
+void AiSceneExecutor::Invalidate()
+{
+	Generation++;
+	Session = "scene-";
+	Session += std::to_string(Generation).c_str();
+	ById.clear();
+	ByObject.clear();
+	KnownEpoch = Scene != nullptr ? Scene->GetAssistantEpoch() : 0;
+	KnownRevision = Scene != nullptr ? Scene->GetModifyCount() : 0;
+}
+
+void AiSceneExecutor::Synchronize()
+{
+	if (Scene != nullptr && (KnownEpoch != Scene->GetAssistantEpoch() || KnownRevision != Scene->GetModifyCount()))
+	{
+		Invalidate();
+	}
+}
+
+AiSceneExecutor::Json AiSceneExecutor::Error(const char* Code, const char* Message) const
+{
+	return {{"ok", false}, {"scene_session", Session.c_str()}, {"revision", KnownRevision}, {"error", {{"code", Code}, {"message", Message}}}};
+}
+
+xr_vector<CCustomObject*> AiSceneExecutor::Objects() const
+{
+	xr_vector<CCustomObject*> Result;
+	for (auto It = Scene->FirstTool(); It != Scene->LastTool(); ++It)
+	{
+		ESceneCustomOTool* Tool = smart_cast<ESceneCustomOTool*>(It->second);
+		if (Tool == nullptr)
+		{
+			continue;
+		}
+		for (CCustomObject* Object : Tool->GetObjects())
+		{
+			if (Object != nullptr && !Object->IsDeleted())
+			{
+				Result.push_back(Object);
+			}
+		}
+	}
+	return Result;
+}
+
+xr_string AiSceneExecutor::Identify(CCustomObject* Object)
+{
+	auto It = ByObject.find(Object);
+	if (It != ByObject.end())
+	{
+		return It->second;
+	}
+	xr_string Id = "object-";
+	Id += std::to_string(++NextObjectId).c_str();
+	ById.emplace(Id, Object);
+	ByObject.emplace(Object, Id);
+	return Id;
+}
+
+CCustomObject* AiSceneExecutor::Find(const xr_string& Id)
+{
+	auto It = ById.find(Id);
+	if (It == ById.end())
+	{
+		return nullptr;
+	}
+	const xr_vector<CCustomObject*> Current = Objects();
+	return std::find(Current.begin(), Current.end(), It->second) != Current.end() ? It->second : nullptr;
+}
+
+AiSceneExecutor::Json AiSceneExecutor::Describe(CCustomObject* Object)
+{
+	Fvector Rotation = Object->GetRotation();
+	Rotation.mul(180.f / PI);
+	const char* Reference = Object->RefName();
+	return {{"id", Identify(Object).c_str()}, {"name", Object->GetName()}, {"class_id", Object->FClassID}, {"class_name", Object->FParentTools->ClassName()}, {"reference", Reference != nullptr ? Reference : ""}, {"position_m", AiVectorJson(Object->GetPosition())}, {"rotation_degrees", AiVectorJson(Rotation)}, {"scale", AiVectorJson(Object->GetScale())}, {"selected", Object->Selected()}, {"editable", Object->Editable()}};
+}
+
+AiSceneExecutor::Json AiSceneExecutor::Status()
+{
+	Json Counts = Json::array();
+	size_t Selected = 0;
+	size_t Count = 0;
+	for (auto It = Scene->FirstTool(); It != Scene->LastTool(); ++It)
+	{
+		ESceneCustomOTool* Tool = smart_cast<ESceneCustomOTool*>(It->second);
+		if (Tool == nullptr)
+		{
+			continue;
+		}
+		size_t ClassCount = 0;
+		for (CCustomObject* Object : Tool->GetObjects())
+		{
+			if (!Object->IsDeleted())
+			{
+				ClassCount++;
+				Selected += Object->Selected() ? 1 : 0;
+			}
+		}
+		Count += ClassCount;
+		Counts.push_back({{"class_id", It->first}, {"class_name", Tool->ClassName()}, {"count", ClassCount}});
+	}
+	return {{"ok", true}, {"path", LTools->m_LastFileName.c_str()}, {"scene_name", LTools->m_LastFileName.empty() ? "Новая сцена" : LTools->m_LastFileName.c_str()}, {"editor_state", (int)EContext.UI->GetEState()}, {"editable", EContext.UI->GetEState() == esEditScene && !Scene->locked() && !Scene->IsPlayInEditor()}, {"unsaved", Scene->IsUnsaved()}, {"modified", Scene->IsModified()}, {"object_count", Count}, {"selected_count", Selected}, {"classes", Counts}, {"undo_enabled", EPrefs->scene_undo_level != 0}, {"undo_count", Scene->GetUndoCount()}, {"redo_count", Scene->GetRedoCount()}, {"coordinate_system", "left-handed; +Y up; world metres; Euler XYZ degrees; scale dimensionless"}};
+}
+
+bool AiSceneExecutor::Resolve(const Json& Params, xr_vector<CCustomObject*>& Result, Json& Failure, bool IsEditable)
+{
+	auto Ids = Params.find("ids");
+	if (Ids != Params.end())
+	{
+		if (!Ids->is_array() || Ids->size() > 128)
+		{
+			Failure = Error("INVALID_IDS", "ids must be an array of up to 128 object IDs");
+			return false;
+		}
+		for (const Json& Id : *Ids)
+		{
+			if (!Id.is_string() || Id.get_ref<const Json::string_t&>().size() > 128)
+			{
+				Failure = Error("INVALID_ID", "Object ID must be a short string");
+				return false;
+			}
+			CCustomObject* Object = Find(Id.get_ref<const Json::string_t&>().c_str());
+			if (Object == nullptr)
+			{
+				Failure = Error("UNKNOWN_OBJECT", "Object ID is unknown or expired; query the current scene again");
+				return false;
+			}
+			if (std::find(Result.begin(), Result.end(), Object) == Result.end())
+			{
+				Result.push_back(Object);
+			}
+		}
+	}
+	else if (AiHasString(Params, "object_id", 128))
+	{
+		CCustomObject* Object = Find(AiString(Params, "object_id"));
+		if (Object == nullptr)
+		{
+			Failure = Error("UNKNOWN_OBJECT", "Object ID is unknown or expired");
+			return false;
+		}
+		Result.push_back(Object);
+	}
+	else
+	{
+		for (CCustomObject* Object : Objects())
+		{
+			if (Object->Selected() && !Object->m_CO_Flags.test(CCustomObject::flObjectInGroup))
+			{
+				Result.push_back(Object);
+			}
+		}
+	}
+	if (Result.size() > 128)
+	{
+		Failure = Error("BATCH_TOO_LARGE", "Select at most 128 objects per operation");
+		return false;
+	}
+	if (IsEditable)
+	{
+		for (CCustomObject* Object : Result)
+		{
+			if (!Object->Editable() || !Object->FParentTools->IsEditable() || !Object->FParentTools->IsEnabled() || Object->m_CO_Flags.test(CCustomObject::flObjectInGroup))
+			{
+				Failure = Error("OBJECT_NOT_EDITABLE", "A target is locked, disabled, or belongs to a group; target the group itself");
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+bool AiSceneExecutor::FinishChange(const AiSceneSnapshot& Before, Json& Result)
+{
+	if (!Scene->CommitAssistantUndo())
+	{
+		Before.Restore();
+		Synchronize();
+		Result = Error("NO_CHANGE", "The operation produced no verified Undo step; the snapshot was restored");
+		return false;
+	}
+	KnownRevision = Scene->GetModifyCount();
+	KnownEpoch = Scene->GetAssistantEpoch();
+	EContext.UI->UpdateScene();
+	EContext.UI->RedrawScene();
+	Result["ok"] = true;
+	Result["undoable"] = true;
+	Result["undo_steps"] = 1;
+	return true;
+}
+
+AiSceneExecutor::Json AiSceneExecutor::Execute(const xr_string& Method, const Json& Params)
+{
+	if (!Params.is_object())
+	{
+		return Error("INVALID_PARAMS", "Parameters must be a JSON object");
+	}
+	const bool IsMutation = AiIsMutation(Method);
+	const xr_string OpId = AiString(Params, "op_id");
+	const xr_string Request = (Json{{"method", Method.c_str()}, {"params", Params}}.dump()).c_str();
+	if (IsMutation)
+	{
+		if (!AiHasString(Params, "op_id", 128) || OpId.empty())
+		{
+			return Error("OP_ID_REQUIRED", "A unique op_id is required for every operation");
+		}
+		auto Previous = Operations.find(OpId);
+		if (Previous != Operations.end())
+		{
+			if (Previous->second.Request != Request)
+			{
+				return Error("OP_ID_COLLISION", "This operation ID was already used with different parameters");
+			}
+			Json Result = Previous->second.Result;
+			Result["replayed"] = true;
+			return Result;
+		}
+		if (Operations.size() >= 10000)
+		{
+			return Error("OPERATION_LIMIT", "Restart the assistant before starting more operations; previous results are retained until restart");
+		}
+	}
+	if (Method == "scene.operation_status")
+	{
+		auto It = Operations.find(OpId);
+		return It == Operations.end() ? Json{{"ok", true}, {"status", "unknown"}} : Json{{"ok", true}, {"status", "completed"}, {"result", It->second.Result}};
+	}
+	if (Scene == nullptr || EContext.UI == nullptr || !Scene->valid())
+	{
+		return Error("EDITOR_UNAVAILABLE", "The scene is not initialized");
+	}
+	if (LUI->LoaderEvent.IsBusy() || Scene->locked())
+	{
+		return Error("EDITOR_BUSY", "The editor is loading, saving, or holding a scene lock; retry after it becomes idle");
+	}
+	Synchronize();
+	if (Params.contains("scene_session") && (!AiHasString(Params, "scene_session", 128) || AiString(Params, "scene_session") != Session))
+	{
+		return Error("STALE_SCENE", "The scene has changed; query status and object IDs again");
+	}
+	if (IsMutation && !AiHasString(Params, "scene_session", 128))
+	{
+		return Error("SCENE_SESSION_REQUIRED", "Query scene.status and include scene_session before changing the editor");
+	}
+	if (IsMutation && (EContext.UI->GetEState() != esEditScene || EContext.UI->ActiveTabIndex != 0 || Scene->IsPlayInEditor()))
+	{
+		return Error("EDITOR_NOT_EDITABLE", "Open the scene tab and finish the current editing operation");
+	}
+	if (AiIsSceneChange(Method) && !Scene->EnsureAssistantUndoBaseline())
+	{
+		return Error("UNDO_DISABLED", "Enable scene Undo before requesting changes");
+	}
+	Json Result = Dispatch(Method, Params);
+	Result["scene_session"] = Session.c_str();
+	Result["revision"] = Scene->GetModifyCount();
+	if (IsMutation)
+	{
+		Result["op_id"] = OpId.c_str();
+		Operations.emplace(OpId, Operation{Request, Result});
+	}
+	return Result;
+}
+
+AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const Json& Params)
+{
+	if (Method == "scene.status")
+	{
+		return Status();
+	}
+	if (Method == "scene.viewport")
+	{
+		return AiCaptureViewport(Params);
+	}
+	if (Method == "scene.search" || Method == "scene.selection")
+	{
+		size_t Offset, Limit;
+		if (!AiPage(Params, Offset, Limit))
+		{
+			return Error("INVALID_PAGE", "offset must be non-negative and limit must be in 1..500");
+		}
+		for (const char* Key : {"name", "reference", "texture"})
+		{
+			if (Params.contains(Key) && !AiHasString(Params, Key, 255))
+			{
+				return Error("INVALID_FILTER", "Search filters must be strings of at most 255 characters");
+			}
+		}
+		if (Params.contains("class_id") && (!Params["class_id"].is_number_integer() || Params["class_id"].get<double>() < 0 || Params["class_id"].get<double>() >= OBJCLASS_COUNT))
+		{
+			return Error("INVALID_CLASS", "class_id is outside the editor class range");
+		}
+		const xr_string Name = AiString(Params, "name");
+		const xr_string Reference = AiString(Params, "reference");
+		const xr_string Texture = AiString(Params, "texture");
+		const xr_vector<CCustomObject*> Current = Objects();
+		Json Items = Json::array();
+		size_t Cursor = std::min(Offset, Current.size());
+		size_t Scanned = 0;
+		while (Cursor < Current.size() && Items.size() < Limit && Scanned < 2000 && (Texture.empty() || Scanned < 32))
+		{
+			CCustomObject* Object = Current[Cursor++];
+			Scanned++;
+			if ((Method == "scene.selection" && !Object->Selected()) || (!Name.empty() && xr_string(Object->GetName()).find(Name) == xr_string::npos))
+			{
+				continue;
+			}
+			if (Params.contains("class_id") && Object->FClassID != Params["class_id"].get<u32>())
+			{
+				continue;
+			}
+			const char* Ref = Object->RefName();
+			if (!Reference.empty() && (Ref == nullptr || xr_string(Ref).find(Reference) == xr_string::npos))
+			{
+				continue;
+			}
+			if (!Texture.empty())
+			{
+				CSceneObject* StaticObject = smart_cast<CSceneObject*>(Object);
+				if (StaticObject == nullptr)
+				{
+					continue;
+				}
+				Json Materials = AiMaterials::Read(*StaticObject);
+				bool HasTexture = false;
+				if (Materials.contains("surfaces"))
+				{
+					for (const Json& Surface : Materials["surfaces"])
+					{
+						if (AiString(Surface, "texture").find(Texture) != xr_string::npos)
+						{
+							HasTexture = true;
+						}
+					}
+				}
+				if (!HasTexture)
+				{
+					continue;
+				}
+			}
+			Items.push_back(Describe(Object));
+		}
+		return {{"ok", true}, {"objects", Items}, {"offset", Offset}, {"next_offset", Cursor}, {"has_more", Cursor < Current.size()}, {"scanned", Scanned}, {"scene_object_count", Current.size()}, {"pagination", "offset is the scene scan cursor; continue next_offset until has_more=false"}};
+	}
+
+	if (Method == "scene.undo" || Method == "scene.redo")
+	{
+		if (EPrefs->scene_undo_level == 0)
+		{
+			return Error("UNDO_DISABLED", "Scene Undo is disabled");
+		}
+		const bool IsDone = Method == "scene.undo" ? Scene->Undo() : Scene->Redo();
+		Synchronize();
+		if (!IsDone)
+		{
+			return Error("HISTORY_EMPTY", "There is no completed change to undo or redo");
+		}
+		return {{"ok", true}, {"undo_count", Scene->GetUndoCount()}, {"redo_count", Scene->GetRedoCount()}, {"object_ids_invalidated", true}};
+	}
+
+	if (Method == "scene.save_copy")
+	{
+		if (!AiHasString(Params, "path", 240) || AiString(Params, "path").empty())
+		{
+			return Error("INVALID_PATH", "Specify an absolute path for a new .level copy (up to 240 UTF-8 bytes)");
+		}
+		const xr_string Name = AiString(Params, "path");
+		const std::filesystem::path Target = std::filesystem::u8path(Name.c_str());
+		std::error_code Code;
+		if (!Target.is_absolute() || Target.extension() != ".level" || !std::filesystem::is_directory(Target.parent_path(), Code) || Code)
+		{
+			return Error("INVALID_PATH", "The copy needs an absolute .level path in an existing directory");
+		}
+		const std::filesystem::path Parts = Target.parent_path() / Target.stem();
+		if (std::filesystem::exists(Target, Code) || std::filesystem::exists(Parts, Code) || Code)
+		{
+			return Error("COPY_EXISTS", "The destination scene or its part directory already exists; choose a new name");
+		}
+		{
+			std::ofstream Probe(Target, std::ios::out | std::ios::binary);
+			if (!Probe)
+			{
+				return Error("WRITE_DENIED", "The destination cannot be written");
+			}
+		}
+		std::filesystem::remove(Target, Code);
+		if (Code)
+		{
+			return Error("WRITE_DENIED", "The destination write probe could not be removed");
+		}
+		const Flags32 BeforeFlags = Scene->m_RTFlags;
+		Scene->SaveLTX(Name.c_str(), false, true);
+		Scene->m_RTFlags = BeforeFlags;
+		const bool IsSaved = std::filesystem::is_regular_file(Target, Code) && !Code && std::filesystem::file_size(Target, Code) > 0 && !Code;
+		if (!IsSaved)
+		{
+			return Error("SAVE_FAILED", "The scene copy was not created; inspect the editor log and destination");
+		}
+		return {{"ok", true}, {"path", Name.c_str()}, {"parts_path", Scene->LevelPartPath(Name.c_str()).c_str()}, {"verified_file", true}, {"original_scene_kept", true}};
+	}
+
+	if (Method == "scene.place")
+	{
+		if (!AiHasString(Params, "reference", 200))
+		{
+			return Error("INVALID_REFERENCE", "Specify a library model reference");
+		}
+		xr_string Reference = AiString(Params, "reference");
+		if (Reference.empty() || Reference.find("..") != xr_string::npos || Reference.find(':') != xr_string::npos || Reference.front() == '/' || Reference.front() == '\\')
+		{
+			return Error("INVALID_REFERENCE", "The model reference must be relative to the SDK object library");
+		}
+		Fvector Position, Rotation, Scale;
+		if (!AiVector(Params, "position_m", Position, 0, 1000000) || !AiVector(Params, "rotation_degrees", Rotation, 0, 360000) || !AiVector(Params, "scale", Scale, 1, 10000) || Scale.x <= 0 || Scale.y <= 0 || Scale.z <= 0)
+		{
+			return Error("INVALID_TRANSFORM", "Model transform must contain finite three-component vectors and positive scale");
+		}
+		ESceneCustomOTool* Tool = Scene->GetOTool(OBJCLASS_SCENEOBJECT);
+		if (Tool == nullptr || !Tool->IsEnabled() || !Tool->IsEditable())
+		{
+			return Error("TOOL_NOT_EDITABLE", "The scene object tool is disabled or locked");
+		}
+		string_path ModelPath;
+		FS.update_path(ModelPath, _objects_, EFS.ChangeFileExt(Reference, ".object").c_str());
+		if (!FS.exist(ModelPath))
+		{
+			return Error("MODEL_MISSING", "The library .object does not exist");
+		}
+		AiSceneSnapshot Before;
+		string256 Name;
+		Scene->GenObjectName(OBJCLASS_SCENEOBJECT, Name, "ai_object");
+		CSceneObject* Object = new CSceneObject(nullptr, Name);
+		if (Object->SetReference(Reference.c_str()) == nullptr)
+		{
+			xr_delete(Object);
+			return Error("MODEL_LOAD_FAILED", "The library model could not be loaded");
+		}
+		if (Object->IsDynamic() && (Scale.x != 1 || Scale.y != 1 || Scale.z != 1))
+		{
+			xr_delete(Object);
+			return Error("DYNAMIC_SCALE", "Dynamic models cannot be scaled in this SDK");
+		}
+		Rotation.mul(PI / 180.f);
+		Object->SetPosition(Position);
+		Object->SetRotation(Rotation);
+		Object->SetScale(Scale);
+		Scene->AppendObject(Object, false);
+		Object->Select(true);
+		Json Result = {{"created", Json::array({Describe(Object)})}};
+		FinishChange(Before, Result);
+		return Result;
+	}
+
+	if (Method == "scene.material_set")
+	{
+		auto Changes = Params.find("changes");
+		if (Changes == Params.end() || !Changes->is_array() || Changes->empty() || Changes->size() > 128)
+		{
+			return Error("INVALID_CHANGES", "changes must contain 1..128 explicit object/surface changes");
+		}
+		xr_vector<CSceneObject*> Targets;
+		xr_set<xr_string> Seen;
+		for (const Json& Change : *Changes)
+		{
+			if (!Change.is_object() || !AiHasString(Change, "object_id", 128))
+			{
+				return Error("INVALID_CHANGE", "Each surface change needs an object_id");
+			}
+			xr_vector<CCustomObject*> ObjectsToChange;
+			Json Failure;
+			if (!Resolve(Change, ObjectsToChange, Failure, true))
+			{
+				return Failure;
+			}
+			CSceneObject* Object = smart_cast<CSceneObject*>(ObjectsToChange.front());
+			if (Object == nullptr)
+			{
+				return Error("NOT_SCENE_OBJECT", "Material changes require a scene object instance");
+			}
+			Json Validation = AiMaterials::ValidatePatch(*Object, Change);
+			if (!Validation.value("ok", false))
+			{
+				return Validation;
+			}
+			xr_string Key = AiString(Change, "object_id") + ":" + Change["surface_index"].dump().c_str();
+			if (!Seen.insert(Key).second)
+			{
+				return Error("DUPLICATE_SURFACE", "A batch may specify each instance surface only once");
+			}
+			Targets.push_back(Object);
+		}
+		AiSceneSnapshot Before;
+		Json Applied = Json::array();
+		for (size_t Index = 0; Index < Targets.size(); Index++)
+		{
+			Scene->BeforeObjectChange(Targets[Index]);
+			Json Change = AiMaterials::ApplyPatch(*Targets[Index], (*Changes)[Index]);
+			if (!Change.value("ok", false))
+			{
+				Before.Restore();
+				Synchronize();
+				Change["rolled_back"] = true;
+				return Change;
+			}
+			Change["object_id"] = Identify(Targets[Index]).c_str();
+			Applied.push_back(Change);
+		}
+		Json Result = {{"changes", Applied}, {"library_objects_modified", false}};
+		FinishChange(Before, Result);
+		return Result;
+	}
+
+	xr_vector<CCustomObject*> Targets;
+	Json Failure;
+	if (Method != "scene.select" && Method != "scene.focus" && Method != "scene.transform" && Method != "scene.duplicate" && Method != "scene.materials" && Method != "scene.missing_textures")
+	{
+		return Error("UNKNOWN_METHOD", "This editor command is not supported");
+	}
+	if (!Resolve(Params, Targets, Failure, AiIsSceneChange(Method)))
+	{
+		return Failure;
+	}
+	if (Targets.empty() && Method != "scene.select")
+	{
+		return Error("EMPTY_SELECTION", "No target objects were supplied or selected");
+	}
+	if (Method == "scene.select")
+	{
+		if (Params.contains("clear") && !Params["clear"].is_boolean())
+		{
+			return Error("INVALID_CLEAR", "clear must be a boolean");
+		}
+		if (!Params.contains("clear") || Params["clear"].get<bool>())
+		{
+			Scene->SelectObjects(false);
+		}
+		for (CCustomObject* Object : Targets)
+		{
+			Object->Select(true);
+		}
+		EContext.UI->UpdateScene();
+		EContext.UI->RedrawScene();
+		Json Result = Status();
+		Result["selected"] = Json::array();
+		for (CCustomObject* Object : Targets)
+		{
+			if (Object->Selected())
+			{
+				Result["selected"].push_back(Describe(Object));
+			}
+		}
+		return Result;
+	}
+	if (Method == "scene.focus")
+	{
+		Fbox Box;
+		Box.invalidate();
+		for (CCustomObject* Object : Targets)
+		{
+			Fbox ObjectBox;
+			if (Object->GetBox(ObjectBox) && ObjectBox.is_valid())
+			{
+				Box.merge(ObjectBox);
+			}
+		}
+		if (!Box.is_valid())
+		{
+			return Error("NO_BOUNDS", "The target objects have no valid bounding box");
+		}
+		EContext.UI->CurrentView().m_Camera.ZoomExtents(Box);
+		EContext.UI->RedrawScene();
+		return {{"ok", true}, {"focused_count", Targets.size()}};
+	}
+	if (Method == "scene.materials" || Method == "scene.missing_textures")
+	{
+		size_t Offset, Limit;
+		if (!AiPage(Params, Offset, Limit))
+		{
+			return Error("INVALID_PAGE", "Invalid material diagnostic page");
+		}
+		Json Items = Json::array();
+		for (CCustomObject* Object : Targets)
+		{
+			CSceneObject* StaticObject = smart_cast<CSceneObject*>(Object);
+			if (StaticObject == nullptr)
+			{
+				return Error("NOT_SCENE_OBJECT", "Surface diagnostics require scene object instances");
+			}
+			Json Item = Method == "scene.materials" ? AiMaterials::Read(*StaticObject) : AiMaterials::MissingTextures(*StaticObject, Offset, Limit);
+			Item["object_id"] = Identify(Object).c_str();
+			Item["name"] = Object->GetName();
+			Items.push_back(Item);
+		}
+		return {{"ok", true}, {"objects", Items}};
+	}
+	if (Method == "scene.transform")
+	{
+		Fvector Translation, RotationDelta, ScaleFactor;
+		if (!AiVector(Params, "translation_m", Translation, 0, 1000000) || !AiVector(Params, "rotation_degrees", RotationDelta, 0, 360000) || !AiVector(Params, "scale_factor", ScaleFactor, 1, 10000) || ScaleFactor.x <= 0 || ScaleFactor.y <= 0 || ScaleFactor.z <= 0)
+		{
+			return Error("INVALID_TRANSFORM", "Transform values must be finite vectors with positive scale factors");
+		}
+		RotationDelta.mul(PI / 180.f);
+		for (CCustomObject* Object : Targets)
+		{
+			CSceneObject* StaticObject = smart_cast<CSceneObject*>(Object);
+			if (StaticObject != nullptr && StaticObject->IsDynamic() && (ScaleFactor.x != 1 || ScaleFactor.y != 1 || ScaleFactor.z != 1))
+			{
+				return Error("DYNAMIC_SCALE", "Dynamic objects cannot be scaled in this SDK");
+			}
+			Fvector Position = Object->GetPosition();
+			Fvector Scale = Object->GetScale();
+			Position.add(Translation);
+			Scale.mul(ScaleFactor);
+			if (!_valid(Position) || !_valid(Scale) || Position.magnitude() > 10000000 || Scale.x > 100000 || Scale.y > 100000 || Scale.z > 100000)
+			{
+				return Error("TRANSFORM_RANGE", "The resulting transform is outside the supported range");
+			}
+		}
+		AiSceneSnapshot Before;
+		Json Changed = Json::array();
+		for (CCustomObject* Object : Targets)
+		{
+			Json Previous = Describe(Object);
+			Scene->BeforeObjectChange(Object);
+			Object->UpdateTransform(true);
+			Fvector Position = Object->GetPosition();
+			Fvector Rotation = Object->GetRotation();
+			Fvector Scale = Object->GetScale();
+			Position.add(Translation);
+			Rotation.add(RotationDelta);
+			Scale.mul(ScaleFactor);
+			Object->NumSetPosition(Position);
+			Object->NumSetRotation(Rotation);
+			Object->NumSetScale(Scale);
+			Object->UpdateTransform(true);
+			if (!Object->GetPosition().similar(Position) || !Object->GetRotation().similar(Rotation) || !Object->GetScale().similar(Scale))
+			{
+				Before.Restore();
+				Synchronize();
+				return Error("TRANSFORM_FAILED", "A target rejected the transform; the scene snapshot was restored");
+			}
+			Changed.push_back({{"before", Previous}, {"after", Describe(Object)}});
+		}
+		Json Result = {{"changed", Changed}, {"transform_space", "world translation; Euler XYZ rotation delta; scaling about each object's pivot"}};
+		FinishChange(Before, Result);
+		return Result;
+	}
+	if (Method == "scene.duplicate")
+	{
+		Fvector Translation;
+		if (!AiVector(Params, "translation_m", Translation, 0, 1000000))
+		{
+			return Error("INVALID_TRANSLATION", "translation_m must contain three finite coordinates");
+		}
+		for (CCustomObject* Object : Targets)
+		{
+			if (Object->FClassID != OBJCLASS_SCENEOBJECT)
+			{
+				return Error("DUPLICATE_CLASS", "Version 1 duplicates scene model instances only");
+			}
+		}
+		AiSceneSnapshot Before;
+		xr_vector<CCustomObject*> Created;
+		for (CCustomObject* Object : Targets)
+		{
+			CMemoryWriter Writer;
+			Scene->SaveObjectStream(Object, Writer);
+			IReader Reader(Writer.pointer(), Writer.size());
+			CCustomObject* Copy = nullptr;
+			if (!Scene->ReadObjectStream(Reader, Copy) || Copy == nullptr)
+			{
+				for (CCustomObject* Partial : Created)
+				{
+					xr_delete(Partial);
+				}
+				return Error("DUPLICATE_FAILED", "The instance could not be cloned; no objects were appended");
+			}
+			string256 Name;
+			Scene->GenObjectName(Copy->FClassID, Name, Object->GetName());
+			xr_string UniqueName = Name;
+			UniqueName += "_";
+			UniqueName += std::to_string(Created.size()).c_str();
+			if (UniqueName.size() >= 255 || Scene->FindObjectByName(UniqueName.c_str(), OBJCLASS_DUMMY) != nullptr)
+			{
+				xr_delete(Copy);
+				for (CCustomObject* Partial : Created)
+				{
+					xr_delete(Partial);
+				}
+				return Error("NAME_CONFLICT", "A unique duplicate name could not be reserved");
+			}
+			Copy->SetName(UniqueName.c_str());
+			Fvector Position = Copy->GetPosition();
+			Position.add(Translation);
+			Copy->SetPosition(Position);
+			Created.push_back(Copy);
+		}
+		Json Items = Json::array();
+		for (CCustomObject* Object : Created)
+		{
+			Scene->AppendObject(Object, false);
+			Object->Select(true);
+			Items.push_back(Describe(Object));
+		}
+		Json Result = {{"created", Items}};
+		FinishChange(Before, Result);
+		return Result;
+	}
+	return Error("UNKNOWN_METHOD", "This editor command is not supported");
+}

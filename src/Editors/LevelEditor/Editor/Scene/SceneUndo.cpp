@@ -256,6 +256,7 @@ void EScene::CaptureUndoState(CUndoJournal::State& Parts)
 
 void EScene::RestoreUndoState(const CUndoJournal::State& Parts)
 {
+	AssistantEpoch++;
 	g_LevelAutoBackup.Cancel();
 	GWorldPartition.MarkDirty();
 	Device.DetailsTask.wait();
@@ -447,4 +448,48 @@ void EScene::RestoreUndoState(const CUndoJournal::State& Parts)
 	Tools->ClearDebugDraw();
 	EContext.UI->UpdateScene(true);
 	SynchronizeObjects();
+}
+
+
+bool EScene::EnsureAssistantUndoBaseline()
+{
+	if (EContext.UI->GetEState() != esEditScene || EPrefs->scene_undo_level == 0)
+	{
+		return false;
+	}
+	if (UndoJournal.IsEmpty())
+	{
+		CUndoJournal::State Parts;
+		CaptureUndoState(Parts);
+		UndoJournal.Reset(std::move(Parts));
+	}
+	return true;
+}
+
+bool EScene::CommitAssistantUndo()
+{
+	if (!EnsureAssistantUndoBaseline())
+	{
+		return false;
+	}
+	CUndoJournal::State Parts;
+	CaptureUndoState(Parts);
+	const bool IsChanged = UndoJournal.Commit(std::move(Parts), true);
+	if (IsChanged)
+	{
+		Modified();
+		EContext.UI->RedrawScene();
+	}
+	return IsChanged;
+}
+
+void EScene::RestoreAssistantState(const CUndoJournal::State& Parts)
+{
+	// RestoreUndoState uses the journal baseline as the authoritative content.
+	// A temporary journal restores the complete snapshot without changing history.
+	CUndoJournal Previous = std::move(UndoJournal);
+	CUndoJournal::State Baseline = Parts;
+	UndoJournal.Reset(std::move(Baseline));
+	RestoreUndoState(Parts);
+	UndoJournal = std::move(Previous);
 }

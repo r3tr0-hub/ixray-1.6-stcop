@@ -1,0 +1,26 @@
+{
+  "rawdata/objects/ai_test/cube.object": {
+    "size": 1767,
+    "sha256": "2ebfca463708e888296b01cb8167819be7774cecfff1602df4392a983e88f95e"
+  },
+  "rawdata/levels/ai_test.level": {
+    "size": 330,
+    "sha256": "b565997de5afefcbc1b1d410bc1aceac4f674c86c48b6d37cae575e2ac8948d6"
+  },
+  "gamedata/textures/ai_test/checker.dds": {
+    "size": 1152,
+    "sha256": "20f7279b08d4a307d02d7ec260c2b73f0f53a57891e01309a19e5cf8ffe41208"
+  },
+  "rawdata/textures/ai_test/checker.tga": {
+    "size": 1042,
+    "sha256": "a1ca4d09e2e0d342630a5f628ecbee98a79751354ec6668103f0ee18ad79cbc6"
+  },
+  "gamedata/textures/ai_test/alternate.dds": {
+    "size": 1152,
+    "sha256": "092f886d0179783a977abe2c31abef85589e250fec9713562e53a3dfaf366be3"
+  },
+  "rawdata/textures/ai_test/alternate.tga": {
+    "size": 1042,
+    "sha256": "e01b2bea23be7e595fac89ed40798b2a1c23cabff01a10355d162157526dd0ce"
+  }
+}

@@ -8,26 +8,45 @@ permissions:
 concurrency:
   group: ixray-ai-${{ github.ref }}
   cancel-in-progress: true
+defaults:
+  run:
+    shell: pwsh
 jobs:
   windows:
     runs-on: windows-2022
-    timeout-minutes: 90
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
       - uses: actions/cache@v4
         with:
-          path: ~/.nuget/packages
-          key: ixray-ai-nuget-${{ hashFiles('**/Packages.config') }}
-      - name: Configure Windows x64
-        run: cmake --preset Editors-x64-Windows -DIXRAY_CI=ON -DIXRAY_PROFILER=OFF
-      - name: Build Release
-        run: cmake --build build/x64/Editors-Windows --config Release --target LevelEditor --parallel 4
-      - uses: actions/upload-artifact@v4
+          path: |
+            ~/.nuget/packages
+            build/ai-release/downloads
+          key: ixray-ai-deps-${{ hashFiles('**/Packages.config', 'tools/ai-assistant/runtime-lock.json') }}
+      - name: Install fixed SDK asset fixtures
+        run: |
+          if (Test-Path tools/ai-assistant/fixtures/content) { Copy-Item tools/ai-assistant/fixtures/content/* ./ -Recurse -Force }
+      - name: Build Windows x64 Release
+        run: ./tools/ai-assistant/build.ps1
+      - name: Package and test official Codex runtime
+        run: ./tools/ai-assistant/package.ps1
+      - name: Upload installer and portable package
+        uses: actions/upload-artifact@v4
+        with:
+          name: IXRay-AI-Assistant-Windows-x64-${{ github.sha }}
+          path: |
+            build/ai-release/*Setup.exe
+            build/ai-release/*Portable.zip
+            build/ai-release/IXRay-AI-Assistant/build-info.json
+            build/ai-release/IXRay-AI-Assistant/SHA256SUMS.json
+          if-no-files-found: error
+      - name: Upload native binaries and build evidence
+        uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ixray-ai-windows-release-${{ github.sha }}
+          name: ixray-ai-build-evidence-${{ github.sha }}
           path: |
             build/x64/Editors-Windows/bin/Release/*.exe
             build/x64/Editors-Windows/bin/Release/*.dll

@@ -1,0 +1,28 @@
+{
+  "version": "0.167.1",
+  "tag": "rust-v0.167.1",
+  "publishedAt": "2026-11-10T21:32:01Z",
+  "source": "https://api.github.com/repos/openai/codex/releases/latest",
+  "cli": {
+    "url": "https://github.com/openai/codex/releases/download/rust-v0.167.1/codex-x86_64-pc-windows-msvc.exe.zip",
+    "sha256": "191bd0dcd77a6aa17d4f8a4ab166fc9d05d24ca4b7015789e2aa9a53dcafb658",
+    "size": 206421980,
+    "launchArguments": ["app-server", "--listen", "stdio://"]
+  },
+  "standalone": {
+    "url": "https://github.com/openai/codex/releases/download/rust-v0.167.1/codex-app-server-x86_64-pc-windows-msvc.exe.zip",
+    "sha256": "6a77d3e7a14e32b345904c0bedfcae2e7c353ca90ec1e4baed6fde75c853c933",
+    "size": 91573430,
+    "launchArguments": ["--listen", "stdio://"]
+  },
+  "standalonePackage": {
+    "url": "https://github.com/openai/codex/releases/download/rust-v0.167.1/codex-app-server-package-x86_64-pc-windows-msvc.tar.gz",
+    "sha256": "4696c5d24ba31a7070c8524d3a8bb67194aed75618c91bf8383d94897c3503fe",
+    "size": 164468301
+  },
+  "documentation": [
+    "https://learn.chatgpt.com/docs/app-server",
+    "https://learn.chatgpt.com/docs/auth",
+    "https://learn.chatgpt.com/docs/extend/mcp?surface=cli"
+  ]
+}

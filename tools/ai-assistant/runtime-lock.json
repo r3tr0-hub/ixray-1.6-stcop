@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "version": "0.1.0",
+  "upstream": "https://github.com/ixray-team/ixray-1.6-stcop",
+  "branch": "develop",
+  "upstreamCommit": "bcf4dd51d6433fdee29ece01f7ce40af16666dec",
+  "node": {
+    "version": "24.22.2",
+    "url": "https://nodejs.org/dist/v24.22.2/node-v24.22.2-win-x64.zip",
+    "sha256": "ca1bff5d8ead13c9f2ea404a176db46bd430704d5b5113734049fa365e7799e2"
+  },
+  "codex": {
+    "version": "0.167.1",
+    "url": "https://github.com/openai/codex/releases/download/rust-v0.167.1/codex-x86_64-pc-windows-msvc.exe.zip",
+    "sha256": "191bd0dcd77a6aa17d4f8a4ab166fc9d05d24ca4b7015789e2aa9a53dcafb658"
+  }
+}

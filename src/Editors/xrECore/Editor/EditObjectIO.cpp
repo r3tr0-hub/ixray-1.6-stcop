@@ -15,6 +15,23 @@
 
 #include "../Layers/xrRenderPC_R4/Shader.h"
 
+static thread_local u32 g_ReadOnlyObjectLoadDepth = 0;
+
+EditableObjectReadOnlyScope::EditableObjectReadOnlyScope()
+{
+	++g_ReadOnlyObjectLoadDepth;
+}
+
+EditableObjectReadOnlyScope::~EditableObjectReadOnlyScope()
+{
+	--g_ReadOnlyObjectLoadDepth;
+}
+
+bool EditableObjectReadOnlyScope::IsActive()
+{
+	return g_ReadOnlyObjectLoadDepth != 0;
+}
+
 bool CEditableObject::Load(const char* fname)
 {
 	if (FS.exist(fname))
@@ -32,7 +49,7 @@ bool CEditableObject::Load(const char* fname)
             m_LoadName 		= fname;
             m_ObjectVersion = age; 
 
-            if (bNeedResave)
+            if (bNeedResave && !EditableObjectReadOnlyScope::IsActive())
             {
                 if (Save(fname))
                     Msg		("* Object '%s' optimized and resaved", fname);

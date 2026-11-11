@@ -11,6 +11,7 @@
 #include "../Editor/Utils/ReferenceReplacer.h"
 #include "../Editor/Utils/GitIntegration.h"
 #include "UIGitWindow.h"
+#include "UIAiAssistant.h"
 
 #include "../../xrEUI/xrUITheme.h"
 #include "../../xrEUI/Windows/Help.h"
@@ -651,6 +652,12 @@ void UIMainMenuForm::Draw()
 
 		if (ImGui::BeginMenu("Windows"))
 		{
+			if (ImGui::MenuItem("ИИ-помощник"))
+			{
+				UIAiAssistant::Show();
+			}
+
+
 			if (ImGui::MenuItemI("Macro Editor", ICON_FA_SQUARE_SHARE_NODES, ""))
 			{
 				UINodesEditorForm::Activate(ENodesMode::Macros);

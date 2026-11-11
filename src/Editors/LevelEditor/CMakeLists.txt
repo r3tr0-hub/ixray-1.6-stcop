@@ -62,6 +62,7 @@ target_compile_definitions(LevelEditor PRIVATE _LEVEL_EDITOR)
 target_compile_definitions(LevelEditor PRIVATE _PP_EDITOR_)
 
 target_compile_options(LevelEditor PRIVATE /W0)
+target_compile_options(LevelEditor PRIVATE /utf-8 /EHsc)
 target_compile_definitions(LevelEditor PRIVATE "$<$<CONFIG:Debug>:DEBUG>")
 
 # Linker list

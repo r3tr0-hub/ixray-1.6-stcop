@@ -95,6 +95,7 @@ protected:
 
 	CUndoJournal	UndoJournal;
 	u32				ModifyCount = 0;
+	xr_atomic_u64 AssistantEpoch = 1;
 
 	TProperties* m_SummaryInfo;
 
@@ -265,6 +266,10 @@ public:
 	bool 			Redo();
 	void			CaptureUndoState(CUndoJournal::State& Parts);
 	void			RestoreUndoState(const CUndoJournal::State& Parts);
+	bool EnsureAssistantUndoBaseline();
+	bool CommitAssistantUndo();
+	void RestoreAssistantState(const CUndoJournal::State& Parts);
+	u64 GetAssistantEpoch() const { return AssistantEpoch.load(); }
 
 	bool 			GetBox(Fbox& box, ObjClassID classfilter);
 	bool 			GetBox(Fbox& box, ObjectList& lst);

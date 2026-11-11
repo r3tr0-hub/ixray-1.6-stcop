@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - '**'
+      - '!feature/level-editor-ai'
     paths:
       - '.github/workflows/**'
       - 'cmake/**'

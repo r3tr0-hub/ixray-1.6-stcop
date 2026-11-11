@@ -1,0 +1,82 @@
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { z } from 'zod/v4';
+import { pathToFileURL } from 'node:url';
+import { LocalEditorClient } from './editor-channel.mjs';
+
+const Id = z.string().min(1).max(256);
+const Vec = z.tuple([z.number().finite(), z.number().finite(), z.number().finite()]);
+const Session = { scene_session: Id.optional() };
+const Mutation = { scene_session: Id, op_id: z.string().min(8).max(128).describe('Уникальный ID операции. При повторе после сбоя ОБЯЗАТЕЛЬНО используйте тот же ID и те же параметры.') };
+const Objects = { ids: z.array(Id).max(1000).optional().describe('Непрозрачные идентификаторы из текущей сцены; по умолчанию выделение.') };
+const Page = { offset: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(500).optional() };
+const Material = {
+  object_id: Id,
+  surface_index: z.number().int().nonnegative(),
+  texture: z.string().min(1).max(1024).optional(),
+  render_shader: z.string().min(1).max(256).optional(),
+  compiler_shader: z.string().min(1).max(256).optional(),
+  game_material: z.string().min(1).max(256).optional()
+};
+
+export const ToolDefinitions = [
+  ['scene.status', 'Текущая сцена, доступность редактирования, несохранённые изменения, количество объектов и выделение. Начните с этого инструмента.', Session],
+  ['scene.search', 'Поиск объектов с постраничным результатом. Совместные фильтры пересекаются. texture учитывает реальные поверхности экземпляра.', { ...Session, ...Page, name: z.string().max(1024).optional(), class_id: z.number().int().optional(), reference: z.string().max(1024).optional(), texture: z.string().max(1024).optional() }],
+  ['scene.selection', 'Читает выделение: непрозрачный ID, имя, класс, модель, позиция (метры), поворот (градусы), масштаб.', { ...Session, ...Page }],
+  ['scene.select', 'Выделить указанные объекты; clear=true сначала снимает выделение. ids=[] и clear=true снимает всё выделение.', { ...Mutation, ids: z.array(Id).max(1000), clear: z.boolean().optional() }],
+  ['scene.focus', 'Навести камеру на объекты или текущее выделение.', { ...Mutation, ...Objects }],
+  ['scene.transform', 'Атомарно изменить объекты одним шагом Undo. translation_m и rotation_degrees — приращения; scale_factor — множители. Система левая, +Y вверх; оси мировые.', { ...Mutation, ...Objects, translation_m: Vec.optional(), rotation_degrees: Vec.optional(), scale_factor: Vec.optional() }],
+  ['scene.duplicate', 'Дублировать указанные объекты или выделение одним шагом Undo. Возвращает ID созданных объектов.', { ...Mutation, ...Objects }],
+  ['scene.place', 'Разместить существующую модель .object из библиотеки SDK одним шагом Undo.', { ...Mutation, reference: z.string().min(1).max(1024), position_m: Vec.optional(), rotation_degrees: Vec.optional(), scale: Vec.optional() }],
+  ['scene.undo', 'Отменить последний штатный шаг Undo. Все старые object ID становятся недействительными; перечитайте сцену.', Mutation],
+  ['scene.redo', 'Повторить последний штатный шаг Redo. Все старые object ID становятся недействительными.', Mutation],
+  ['scene.materials', 'Прочитать отдельные поверхности выбранных объектов: текстура, render shader, compiler shader, game material.', { ...Session, ...Objects, object_id: Id.optional() }],
+  ['scene.material_set', 'Изменить точно указанные поверхности ЭКЗЕМПЛЯРОВ сцены одним шагом Undo. Библиотечные .object не изменяются. Сначала прочитайте материалы; используйте только существующие ресурсы.', { ...Mutation, changes: z.array(z.object(Material).strict()).min(1).max(1000) }],
+  ['scene.missing_textures', 'Проверить текстуры поверхностей с учётом реальных путей файловой системы SDK.', { ...Session, ...Objects, ...Page, object_id: Id.optional() }],
+  ['scene.viewport', 'Получить актуальное изображение viewport с привязкой к сцене и ревизии. Выполняйте после изменения для визуальной проверки.', Session],
+  ['scene.save_copy', 'Сохранить открытую сцену в отдельную НОВУЮ копию по абсолютному пути. Существующие файлы не перезаписываются.', { ...Mutation, path: z.string().min(1).max(4096) }],
+  ['scene.operation_status', 'Проверить уже отправленную операцию по op_id после обрыва связи или таймаута. Не создаёт и не повторяет изменения.', { op_id: z.string().min(8).max(128) }]
+];
+
+export function createMcpServer(editor) {
+  const server = new McpServer({ name: 'ixray-level-editor', version: '0.1.0' });
+  for (const [method, description, shape] of ToolDefinitions) {
+    const mutation = Object.hasOwn(shape, 'op_id');
+    server.registerTool(method.replaceAll('.', '_'), {
+      title: `IX-Ray: ${method.slice(6)}`,
+      description,
+      inputSchema: z.object(shape).strict(),
+      annotations: { readOnlyHint: !mutation, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    }, async (params, extra) => {
+      if (extra.signal.aborted) return { content: [{ type: 'text', text: 'Команда отменена до отправки в редактор.' }], isError: true };
+      try {
+        const result = await editor.request(method, params);
+        if (method === 'scene.viewport' && result?.ok !== false) {
+          const data = result.data ?? result.image_base64 ?? result.png_base64;
+          const mime = result.mime_type ?? result.mimeType ?? 'image/png';
+          if (typeof data !== 'string' || data.length > 24 * 1024 * 1024 || mime !== 'image/png') {
+            throw Object.assign(new Error('Редактор вернул неподдерживаемый снимок viewport.'), { code: 'INVALID_VIEWPORT' });
+          }
+          const metadata = { ...result }; delete metadata.data; delete metadata.image_base64; delete metadata.png_base64;
+          return { content: [{ type: 'text', text: JSON.stringify(metadata) }, { type: 'image', data, mimeType: mime }] };
+        }
+        return { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result && typeof result === 'object' ? result : { result }, isError: result?.ok === false };
+      } catch (error) {
+        return { content: [{ type: 'text', text: JSON.stringify({ ok: false, error: { code: error.code ?? 'EDITOR_ERROR', message: error.message, outcome: error.outcome } }) }], isError: true };
+      }
+    });
+  }
+  return server;
+}
+
+async function main() {
+  const editor = await new LocalEditorClient({ path: process.env.IXRAY_EDITOR_PIPE, token: process.env.IXRAY_EDITOR_TOKEN }).start();
+  const server = createMcpServer(editor);
+  await server.connect(new StdioServerTransport());
+  process.stdin.once('end', () => { editor.close(); server.close().catch(() => {}); });
+  process.once('SIGTERM', () => { editor.close(); server.close().catch(() => {}); });
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(error => { process.stderr.write(`IX-Ray MCP: ${error.code ?? 'START_FAILED'}\n`); process.exitCode = 1; });
+}

@@ -9,6 +9,7 @@
 #define SCENEOBJ_CHUNK_PLACEMENT     	0x0904
 #define SCENEOBJ_CHUNK_FLAGS			0x0905
 #define SCENEOBJ_CHUNK_SURFACE			0x0906
+#define SCENEOBJ_CHUNK_SURFACE_INDICES	0x0907
 
 bool CSceneObject::ResolveReference(const char* Name)
 {
@@ -52,12 +53,20 @@ void CSceneObject::ApplySurfaceOverrides()
     for (const SSurfaceOverride& Override : PendingSurfaces)
     {
         CSurface* Surf = nullptr;
-        for (CSurface* It : m_Surfaces)
+        if (Override.SurfaceIndex < m_Surfaces.size())
         {
-            if (It->m_pData.second->m_Name == Override.Name.c_str())
+            Surf = m_Surfaces[Override.SurfaceIndex];
+        }
+        else
+        {
+            // Older scenes identified surfaces by name only.
+            for (CSurface* It : m_Surfaces)
             {
-                Surf = It;
-                break;
+                if (It->m_pData.second->m_Name == Override.Name.c_str())
+                {
+                    Surf = It;
+                    break;
+                }
             }
         }
 
@@ -71,6 +80,13 @@ void CSceneObject::ApplySurfaceOverrides()
             Surf->OnDeviceDestroy();
         }
 
+        // Instance overrides must never modify data owned by the shared library.
+        if (Surf->UseShared)
+        {
+            Surf->m_pData.second = new SSurfaceData(*Surf->m_pData.second);
+            Surf->UseShared = false;
+            Surf->UseSharedPrev = false;
+        }
         Surf->SetShader(Override.Shader.c_str());
         Surf->SetShaderXRLC(Override.ShaderXRLC.c_str());
         Surf->SetGameMtl(Override.GameMtl.c_str());
@@ -91,9 +107,10 @@ void CSceneObject::CaptureSurfaceOverrides(xr_vector<SSurfaceOverride>& Dest) co
     }
 
     Dest.clear();
-    for (const CSurface* Surf : m_Surfaces)
+    for (size_t Index = 0; Index < m_Surfaces.size(); ++Index)
     {
-        Dest.push_back({ Surf->_Name(), Surf->_ShaderName(), Surf->_ShaderXRLCName(), Surf->_GameMtlName(), Surf->_Texture(), Surf->m_VMap.c_str() });
+        const CSurface* Surf = m_Surfaces[Index];
+        Dest.push_back({ Surf->_Name(), Surf->_ShaderName(), Surf->_ShaderXRLCName(), Surf->_GameMtlName(), Surf->_Texture(), Surf->m_VMap.c_str(), u32(Index) });
     }
 }
 
@@ -224,6 +241,12 @@ bool CSceneObject::LoadLTX(CInifile& ini, const char* sect_name)
                 ini_stream.r_string(Override.GameMtl);
                 ini_stream.r_string(Override.Texture);
                 ini_stream.r_string(Override.VMap);
+                string64 IndexKey;
+                xr_sprintf(IndexKey, "surface_override_index_%u", i);
+                if (ini.line_exist(sect_name, IndexKey))
+                {
+                    Override.SurfaceIndex = ini.r_u32(sect_name, IndexKey);
+                }
             }
         }
     }
@@ -255,8 +278,12 @@ void CSceneObject::SaveLTX(CInifile& ini, const char* sect_name)
         ini_stream.sect = sect_name;
         ini_stream.move_begin();
         ini_stream.w_u32(Surfaces.size());
-        for (const SSurfaceOverride& Surf : Surfaces)
+        for (size_t Index = 0; Index < Surfaces.size(); ++Index)
         {
+            const SSurfaceOverride& Surf = Surfaces[Index];
+            string64 IndexKey;
+            xr_sprintf(IndexKey, "surface_override_index_%u", u32(Index));
+            ini.w_u32(sect_name, IndexKey, Surf.SurfaceIndex);
             ini_stream.w_stringZ(Surf.Name.c_str());
             ini_stream.w_stringZ(Surf.Shader.c_str());
             ini_stream.w_stringZ(Surf.ShaderXRLC.c_str());
@@ -314,6 +341,21 @@ bool CSceneObject::LoadStream(IReader& F)
         }
     }
 
+    if (m_Flags.test(flUseSurface))
+    {
+        const u32 ChunkSize = F.find_chunk(SCENEOBJ_CHUNK_SURFACE_INDICES);
+        if (ChunkSize >= sizeof(u32))
+        {
+            const u32 Count = F.r_u32();
+            if (Count == PendingSurfaces.size() && u64(ChunkSize) >= sizeof(u32) * (u64(Count) + 1))
+            {
+                for (SSurfaceOverride& Override : PendingSurfaces)
+                {
+                    Override.SurfaceIndex = F.r_u32();
+                }
+            }
+        }
+    }
     return LoadReference();
 }
 
@@ -350,6 +392,15 @@ void CSceneObject::SaveStream(IWriter& F)
             F.w_stringZ(Surf.GameMtl.c_str());
             F.w_stringZ(Surf.Texture.c_str());
             F.w_stringZ(Surf.VMap.c_str());
+        }
+        F.close_chunk();
+
+        // Optional metadata keeps exact instance surface identity for repeated names.
+        F.open_chunk(SCENEOBJ_CHUNK_SURFACE_INDICES);
+        F.w_u32(u32(Surfaces.size()));
+        for (const SSurfaceOverride& Surf : Surfaces)
+        {
+            F.w_u32(Surf.SurfaceIndex);
         }
         F.close_chunk();
     }

@@ -690,3 +690,12 @@ void CSceneObject::ClearSurface()
 	m_Flags.set(flUseSurface, 0);
 	Tools->UpdateProperties();
 }
+
+void CSceneObject::MarkInstanceSurfacesModified()
+{
+	g_LevelAutoBackup.Cancel();
+	m_Flags.set(flUseSurface, true);
+	GEditorSceneSubmit.InvalidatePrepared();
+	Tools->UpdateProperties();
+	EContext.UI->RedrawScene();
+}

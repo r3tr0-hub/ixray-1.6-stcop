@@ -11,6 +11,7 @@
 #include "Editor/Terrain/HeightmapUtils.h"
 
 #include "IconsFontAwesome7.h"
+#include "UIAiAssistant.h"
 #include "../xrECore/Editor/UILightingForm.h"
 #include "../xrECore/Editor/imgui_EditorEx.h"
 
@@ -125,6 +126,7 @@ void UIMainForm::OpenSavedWindows()
 
 UIMainForm::~UIMainForm()
 {
+	UIAiAssistant::Shutdown();
 	CEditorWndStates::Get().Save();
 
 	ClearChooseEvents();
@@ -256,10 +258,12 @@ void UIMainForm::Draw()
 		m_WorldProperties->Draw();
 		m_Render->Draw();
 	}
+	UIAiAssistant::Draw();
 }
 
 bool UIMainForm::Frame()
 {
+	UIAiAssistant::Tick();
 	return EContext.UI && EContext.UI->Idle();
 }
 

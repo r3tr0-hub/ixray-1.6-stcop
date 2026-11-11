@@ -752,6 +752,7 @@ bool EScene::OnLoadAppendObject(CCustomObject* O)
 
 bool EScene::LoadLTX(const char* map_name, bool bUndo)
 {
+	AssistantEpoch++;
 	PROF_EVENT("EScene::LoadLTX")
 	DWORD version = 0;
 	if (!map_name||(0==map_name[0])) return false;
@@ -858,6 +859,7 @@ bool EScene::LoadLTX(const char* map_name, bool bUndo)
 
 bool EScene::Load(const char* map_name, bool bUndo)
 {
+	AssistantEpoch++;
 	PROF_EVENT("EScene::Load")
 	u32 version = 0;
 

@@ -305,6 +305,7 @@ void EScene::Unload(bool bEditableOnly)
 ECORE_API xrGUID generate_guid();
 void EScene::Clear(bool bEditableToolsOnly)
 {
+	AssistantEpoch++;
 	g_LevelAutoBackup.Cancel();
 	GWorldPartition.MarkDirty();
 	Device.DetailsTask.wait();

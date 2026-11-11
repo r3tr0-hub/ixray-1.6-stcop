@@ -31,6 +31,17 @@ class	CCustomObject;
 // refs
 class SSimpleImage;
 
+// Suppresses legacy loader auto-resaves during read-only scene automation.
+class ECORE_API EditableObjectReadOnlyScope final
+{
+public:
+	EditableObjectReadOnlyScope();
+	~EditableObjectReadOnlyScope();
+	EditableObjectReadOnlyScope(const EditableObjectReadOnlyScope&) = delete;
+	EditableObjectReadOnlyScope& operator=(const EditableObjectReadOnlyScope&) = delete;
+	static bool IsActive();
+};
+
 class ECORE_API CSurface
 {
 	u32				m_GameMtlID;
