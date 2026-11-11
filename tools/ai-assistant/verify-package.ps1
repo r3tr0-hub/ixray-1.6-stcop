@@ -78,38 +78,114 @@ try {
     # Exercise native startup only after independent install/update/rollback checks.
     $Process = Start-Process -FilePath $Exe -ArgumentList @('-ai-selftest','-ai-warp','-nosound','-fsltx','fs.ltx') -WorkingDirectory $Installation -PassThru
     $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    while (-not $Process.HasExited -and [DateTime]::UtcNow -lt $Deadline) {
-        Start-Sleep -Milliseconds 500
-        $Process.Refresh()
-    }
-    if (-not $Process.HasExited) {
-        Save-DesktopScreenshot 'native-timeout.png'
-        Stop-Process -Id $Process.Id -Force
-        throw 'Level Editor self-test timed out; no native success is claimed.'
-    }
     $ReportPath = Join-Path $Installation '_appdata_ixray_/ai-selftest-report.json'
-    if (-not (Test-Path $ReportPath)) {
-        Save-DesktopScreenshot 'native-no-report.png'
-        throw "Level Editor exited ($($Process.ExitCode)) without a self-test report."
+    $Report = $null
+    $ReportError = $null
+    # The terminal report describes the checks. The editor window can remain
+    # open after the report is written, so process exit is a separate result.
+    while ($true) {
+        $Process.Refresh()
+        $Exited = $Process.HasExited
+        if (Test-Path -LiteralPath $ReportPath -PathType Leaf) {
+            try {
+                $Candidate = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json -ErrorAction Stop
+                if ($null -eq $Candidate -or $Candidate.status -notin 'running','passed','failed') { throw 'The report has an unknown status.' }
+                if ($Candidate.status -ne 'running') {
+                    if ($Candidate.ok -isnot [bool] -or $Candidate.ok -ne ($Candidate.status -eq 'passed')) {
+                        throw 'The terminal report status and ok result disagree.'
+                    }
+                    if ($Candidate.checks -isnot [Array] -or $Candidate.checks.Count -eq 0) { throw 'The terminal report contains no checks.' }
+                    $Report = $Candidate
+                }
+                $ReportError = $null
+            } catch {
+                # A report may still be getting written. Retry until it is
+                # complete or the process exits or reaches its deadline.
+                $ReportError = $_.Exception.Message
+            }
+        }
+        if ($null -ne $Report -or $Exited -or [DateTime]::UtcNow -ge $Deadline) { break }
+        Start-Sleep -Milliseconds 500
     }
-    $Report = Get-Content $ReportPath -Raw | ConvertFrom-Json
-    $Evidence.nativeLaunch = $true
-    $Evidence.nativeReport = $Report
-    Copy-Item $ReportPath (Join-Path $Output 'ai-selftest-report.json')
-    if ($Report.ok -ne $true) { throw 'The native scene self-test reported failures.' }
-    $Evidence.nativeSceneTests = $true
+    $NativeFailure = $null
+    if ($null -ne $Report) {
+        $Evidence.nativeLaunch = $true
+        $Evidence.nativeReport = $Report
+        $Evidence.nativeSceneTests = $Report.ok
+        Copy-Item -LiteralPath $ReportPath -Destination (Join-Path $Output 'ai-selftest-report.json')
+        if (-not $Report.ok) { $NativeFailure = 'The native scene self-test reported failures.' }
+    } elseif ($ReportError) {
+        Save-DesktopScreenshot 'native-invalid-report.png'
+        $NativeFailure = "Level Editor self-test report is invalid. $ReportError"
+    } elseif ($Process.HasExited) {
+        Save-DesktopScreenshot 'native-no-report.png'
+        $NativeFailure = "Level Editor exited ($($Process.ExitCode)) before producing a terminal self-test report."
+    } else {
+        Save-DesktopScreenshot 'native-timeout.png'
+        $NativeFailure = 'Level Editor self-test reached its deadline without a terminal report.'
+    }
+
+    $Evidence.nativeTeardown = 'exited'
+    if (-not $Process.HasExited) { [void]$Process.WaitForExit(1500) }
+    if (-not $Process.HasExited) {
+        try {
+            if ($Process.CloseMainWindow() -and $Process.WaitForExit(5000)) { $Evidence.nativeTeardown = 'graceful' }
+        } catch {
+            $Evidence.diagnosticErrors += ('Window close failed: ' + $_.Exception.Message)
+        }
+        if (-not $Process.HasExited) {
+            try {
+                $Process.Kill()
+                if ($Process.WaitForExit(5000)) { $Evidence.nativeTeardown = 'forced' }
+                else { $Evidence.nativeTeardown = 'cleanup_timeout' }
+            } catch {
+                $Evidence.nativeTeardown = 'cleanup_failed'
+                $Evidence.diagnosticErrors += ('Process cleanup failed: ' + $_.Exception.Message)
+            }
+        }
+    }
+    if ($Process.HasExited) { $Evidence.nativeExitCode = $Process.ExitCode }
+    $Process.Dispose()
+
+    $EditorLogDirectory = Join-Path $Installation 'logs'
+    $EditorLogs = @()
+    if (Test-Path -LiteralPath $EditorLogDirectory -PathType Container) {
+        $EditorLogs = @(Get-ChildItem -LiteralPath $EditorLogDirectory -Filter 'leveleditor-*.log' -File)
+    }
+    $Evidence.rendererLogCount = $EditorLogs.Count
+    $Evidence.rendererAssertions = @(
+        foreach ($Log in $EditorLogs) {
+            Select-String -LiteralPath $Log.FullName -Pattern '\[error\]Function\s*:\s*(CResourceManager::_CreateRT|CRT::create)\s*$' | ForEach-Object {
+                @{ file=$Log.Name; line=$_.LineNumber; function=$_.Matches[0].Groups[1].Value }
+            }
+        }
+    )
+    $Evidence.rendererClean = $EditorLogs.Count -gt 0 -and $Evidence.rendererAssertions.Count -eq 0
+    if (-not $NativeFailure -and -not $Evidence.rendererClean) {
+        if ($EditorLogs.Count -eq 0) { $NativeFailure = 'No Level Editor log was available to verify renderer startup.' }
+        else { $NativeFailure = 'Level Editor reported render-target assertions. See rendererAssertions and installed test logs.' }
+    }
+    if ($NativeFailure) { throw $NativeFailure }
 } catch {
     $Evidence.errors += $_.Exception.Message
     throw
 } finally {
-    Save-Evidence
     $EvidenceDir = Join-Path $Output 'installed-test-evidence'
     New-Item -ItemType Directory -Force $EvidenceDir | Out-Null
-    Get-ChildItem $TestRoot -File | Where-Object { $_.Extension -in '.log','.png' } | Copy-Item -Destination $EvidenceDir
-    foreach ($Directory in @('logs','_appdata_ixray_')) {
-        $Source = Join-Path $Installation $Directory
-        if (Test-Path $Source) { Copy-Item $Source $EvidenceDir -Recurse -Force }
+    try {
+        Get-ChildItem $TestRoot -File | Where-Object { $_.Extension -in '.log','.png' } | Copy-Item -Destination $EvidenceDir
+        foreach ($Directory in @('logs','_appdata_ixray_')) {
+            $Source = Join-Path $Installation $Directory
+            if (Test-Path $Source) { Copy-Item $Source $EvidenceDir -Recurse -Force }
+        }
+    } catch {
+        $Evidence.diagnosticErrors += ('Copying test logs failed: ' + $_.Exception.Message)
     }
     # This directory is a disposable CI installation created by this script only.
-    if (Test-Path $TestRoot) { Remove-Item $TestRoot -Recurse -Force }
+    try {
+        if (Test-Path $TestRoot) { Remove-Item $TestRoot -Recurse -Force }
+    } catch {
+        $Evidence.diagnosticErrors += ('Removing the test installation failed: ' + $_.Exception.Message)
+    }
+    Save-Evidence
 }

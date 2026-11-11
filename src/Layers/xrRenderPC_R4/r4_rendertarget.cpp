@@ -804,8 +804,10 @@ CRenderTarget::CRenderTarget()
 	{
 		ERHI_FORMAT	fmt = ERHI_FORMAT::R11G11B10_FLOAT;
 
-		u32 BW_G = std::ceil(Device.TargetWidth / 128.0f), 
-			BH_G = std::ceil(Device.TargetHeight / 128);
+		// The editor renders into its active viewport, which can be smaller than 128 pixels.
+		const u32 BW_G = std::max(1u, (get_target_width() + 127u) / 128u);
+		const u32 HeightRounding = Device.IsEditorMode() ? 127u : 0u;
+		const u32 BH_G = std::max(1u, (get_target_height() + HeightRounding) / 128u);
 
 		u32 BW_F = BW_G * 2, BH_F = BH_G * 2;
 		u32 BW_E = BW_F * 2, BH_E = BH_F * 2;
@@ -860,7 +862,7 @@ CRenderTarget::CRenderTarget()
 		GRHI->ClearTarget(rt_dof_focus->pRT, ERTColor::Gray);
 		GRHI->ClearTarget(rt_dof_focus_prev->pRT, ERTColor::Gray);
 		//fmt = ERHI_FORMAT::R16G16B16A16_FLOAT;
-		u32 CoCW = Device.TargetWidth, CoCH = Device.TargetHeight;
+		u32 CoCW = get_target_width(), CoCH = get_target_height();
 		rt_dof_coc.create(r2_RT_dof_coc, CoCW, CoCH, fmt);
 		rt_dof_coc_prev.create(r2_RT_dof_coc_prev, CoCW, CoCH, fmt);
 
@@ -1065,10 +1067,10 @@ CRenderTarget::CRenderTarget()
 	s_menu.create("distort");
 	g_menu.create(FVF::F_TL, RCache.Vertex.Buffer(), RCache.QuadIB);
 
-	u_setrt(Device.TargetWidth, Device.TargetHeight, rt_BackbufferLUT->pRT, nullptr, nullptr, nullptr);
+	u_setrt(get_target_width(), get_target_height(), rt_BackbufferLUT->pRT, nullptr, nullptr, nullptr);
 
-	dwWidth = Device.TargetWidth;
-	dwHeight = Device.TargetHeight;
+	dwWidth = get_target_width();
+	dwHeight = get_target_height();
 
 	CreateFSTriangle();
 }

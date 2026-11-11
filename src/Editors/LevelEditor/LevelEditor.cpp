@@ -208,7 +208,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, char* pCmdLin
 	while (!NeedExit)
 	{
 		SDL_Event Event;
-		while (SDL_PollEvent(&Event))
+		while (!NeedExit && SDL_PollEvent(&Event))
 		{
 			switch (Event.type)
 			{
@@ -217,7 +217,6 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, char* pCmdLin
 				SDL_WindowID MainWndID = SDL_GetWindowID(g_AppInfo.Window);
 				if (Event.window.windowID == MainWndID)
 				{
-					GContentView->Destroy();
 					NeedExit = true;
 				}
 
@@ -342,13 +341,16 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, char* pCmdLin
 			}
 		}
 
-		MainForm->Frame();
+		if (NeedExit || !MainForm->Frame())
+		{
+			break;
+		}
 		LUI->UpdateTaskbar();
 
 		if (g_pGamePersistent)
 			g_pGamePersistent->UpdateParticles();
 	}
-	//s.join();
+	GContentView->Destroy();
 
 	CTaskbarProgress::Instance().Release();
 
