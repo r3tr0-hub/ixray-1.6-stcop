@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Editor/Entry/Terrain/Terrain.h"
+
 namespace AiWorld
 {
 static bool IsName(const xr_string& Name)
