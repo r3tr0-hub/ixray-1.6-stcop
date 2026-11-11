@@ -1,15 +1,35 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param([string]$Output = '', [int]$TimeoutSeconds = 180)
 $ErrorActionPreference = 'Stop'
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 if (-not $Output) { $Output = Join-Path $Root 'build/ai-release' }
-$Evidence = [ordered]@{ commit=(& git -C $Root rev-parse HEAD).Trim(); configuration='Release'; nativeLaunch=$false; nativeSceneTests=$false; install=$false; update=$false; rollback=$false; liveChatGPTLogin=$false; liveModelTurn=$false; errors=@() }
+$Evidence = [ordered]@{ commit=(& git -C $Root rev-parse HEAD).Trim(); configuration='Release'; nativeLaunch=$false; nativeSceneTests=$false; install=$false; update=$false; rollback=$false; liveChatGPTLogin=$false; liveModelTurn=$false; errors=@(); screenshots=@(); diagnosticErrors=@() }
 $TemporaryParent = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [IO.Path]::GetTempPath() }
 $TestRoot = Join-Path $TemporaryParent ('ИИ SDK ' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
 $Installation = Join-Path $TestRoot 'SDK с пробелами'
 New-Item -ItemType Directory -Force $TestRoot | Out-Null
 function Save-Evidence {
     [IO.File]::WriteAllText((Join-Path $Output 'CI_EVIDENCE.json'), ($Evidence | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
+}
+function Save-DesktopScreenshot([string]$Name) {
+    $Bitmap = $null
+    $Graphics = $null
+    try {
+        Add-Type -AssemblyName System.Windows.Forms
+        Add-Type -AssemblyName System.Drawing
+        $Bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
+        if ($Bounds.Width -le 0 -or $Bounds.Height -le 0) { throw 'No desktop surface is available.' }
+        $Bitmap = [System.Drawing.Bitmap]::new($Bounds.Width, $Bounds.Height)
+        $Graphics = [System.Drawing.Graphics]::FromImage($Bitmap)
+        $Graphics.CopyFromScreen($Bounds.X, $Bounds.Y, 0, 0, $Bounds.Size, [System.Drawing.CopyPixelOperation]::SourceCopy)
+        $Bitmap.Save((Join-Path $TestRoot $Name), [System.Drawing.Imaging.ImageFormat]::Png)
+        $Evidence.screenshots += $Name
+    } catch {
+        $Evidence.diagnosticErrors += ('Desktop capture failed: ' + $_.Exception.Message)
+    } finally {
+        if ($Graphics) { $Graphics.Dispose() }
+        if ($Bitmap) { $Bitmap.Dispose() }
+    }
 }
 function Run-Installer {
     $Installer = Join-Path $Output 'IXRay-AI-Assistant-0.1.0-Windows-x64-Setup.exe'
@@ -25,24 +45,6 @@ try {
     $BuildInfo = Get-Content (Join-Path $Installation 'build-info.json') -Raw | ConvertFrom-Json
     $Evidence.nativeCommit = $BuildInfo.commit
     $Evidence.integrationCommit = $BuildInfo.integrationCommit
-    $Process = Start-Process -FilePath $Exe -ArgumentList @('-ai-selftest','-ai-warp','-nosound','-fsltx','fs.ltx') -WorkingDirectory $Installation -PassThru
-    $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    while (-not $Process.HasExited -and [DateTime]::UtcNow -lt $Deadline) {
-        Start-Sleep -Milliseconds 500
-        $Process.Refresh()
-    }
-    if (-not $Process.HasExited) {
-        Stop-Process -Id $Process.Id -Force
-        throw 'Level Editor self-test timed out; no native success is claimed.'
-    }
-    $ReportPath = Join-Path $Installation '_appdata_ixray_/ai-selftest-report.json'
-    if (-not (Test-Path $ReportPath)) { throw "Level Editor exited ($($Process.ExitCode)) without a self-test report." }
-    $Report = Get-Content $ReportPath -Raw | ConvertFrom-Json
-    $Evidence.nativeLaunch = $true
-    $Evidence.nativeReport = $Report
-    Copy-Item $ReportPath (Join-Path $Output 'ai-selftest-report.json')
-    if ($Report.ok -ne $true) { throw 'The native scene self-test reported failures.' }
-    $Evidence.nativeSceneTests = $true
     # A complete update must preserve project files, program rollback and integration data.
     $UserResource = Join-Path $Installation 'rawdata/user-preservation-test.txt'
     $PreviousSentinel = Join-Path $Installation 'bin/previous-build-test.txt'
@@ -65,6 +67,29 @@ try {
     if (-not (Test-Path $PreviousSentinel) -or (Get-Content $UserResource -Raw) -ne 'preserve resource') { throw 'Rollback did not restore the previous program files and preserve project data.' }
     if (-not (Test-Path $PreviousTool) -or (Get-FileHash $FileSystemConfig -Algorithm SHA256).Hash -ne $ConfigHash) { throw 'Rollback did not restore service files and project configuration.' }
     $Evidence.rollback = $true
+    # Exercise native startup only after independent install/update/rollback checks.
+    $Process = Start-Process -FilePath $Exe -ArgumentList @('-ai-selftest','-ai-warp','-nosound','-fsltx','fs.ltx') -WorkingDirectory $Installation -PassThru
+    $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while (-not $Process.HasExited -and [DateTime]::UtcNow -lt $Deadline) {
+        Start-Sleep -Milliseconds 500
+        $Process.Refresh()
+    }
+    if (-not $Process.HasExited) {
+        Save-DesktopScreenshot 'native-timeout.png'
+        Stop-Process -Id $Process.Id -Force
+        throw 'Level Editor self-test timed out; no native success is claimed.'
+    }
+    $ReportPath = Join-Path $Installation '_appdata_ixray_/ai-selftest-report.json'
+    if (-not (Test-Path $ReportPath)) {
+        Save-DesktopScreenshot 'native-no-report.png'
+        throw "Level Editor exited ($($Process.ExitCode)) without a self-test report."
+    }
+    $Report = Get-Content $ReportPath -Raw | ConvertFrom-Json
+    $Evidence.nativeLaunch = $true
+    $Evidence.nativeReport = $Report
+    Copy-Item $ReportPath (Join-Path $Output 'ai-selftest-report.json')
+    if ($Report.ok -ne $true) { throw 'The native scene self-test reported failures.' }
+    $Evidence.nativeSceneTests = $true
 } catch {
     $Evidence.errors += $_.Exception.Message
     throw
@@ -72,7 +97,7 @@ try {
     Save-Evidence
     $EvidenceDir = Join-Path $Output 'installed-test-evidence'
     New-Item -ItemType Directory -Force $EvidenceDir | Out-Null
-    Get-ChildItem $TestRoot -Filter '*.log' -File | Copy-Item -Destination $EvidenceDir
+    Get-ChildItem $TestRoot -File | Where-Object { $_.Extension -in '.log','.png' } | Copy-Item -Destination $EvidenceDir
     foreach ($Directory in @('logs','_appdata_ixray_')) {
         $Source = Join-Path $Installation $Directory
         if (Test-Path $Source) { Copy-Item $Source $EvidenceDir -Recurse -Force }

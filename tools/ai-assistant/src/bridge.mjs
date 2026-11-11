@@ -79,6 +79,10 @@ export class Bridge {
     this.errorCodes = []; this.operations = []; this.client = null; this.editorStatus = null;
     this.approvals = new Map(); this.cancelGeneration = 0; this.loadedThreadId = null;
     this.historyLoadedThreadId = null;
+    this.readyPromise = new Promise((resolveReady, rejectReady) => { this.resolveReady = resolveReady; this.rejectReady = rejectReady; });
+    // Startup failure is also reported by main(); this sink prevents an
+    // unhandled rejection when no panel request was waiting yet.
+    this.readyPromise.catch(() => {});
     this.local.on('clients', count => { this.mcpClients = count; this.event('status', this.status()); });
     this.local.on('operation', operation => {
       this.operations.push({ at: new Date().toISOString(), ...operation });
@@ -99,19 +103,25 @@ export class Bridge {
   status() { return { appServer: this.client ? 'ready' : 'disconnected', mcp: this.mcpClients ? 'connected' : 'waiting', editor: this.editorStatus, state: this.state }; }
 
   async start() {
-    await mkdir(this.codexHome, { recursive: true, mode: 0o700 });
-    await mkdir(this.workspace, { recursive: true, mode: 0o700 });
-    await this.acquireProfileSession();
-    try { await this.local.start(); }
-    catch (error) { await this.releaseProfileSession(); throw error; }
-    // Account credentials remain entirely in Codex's own isolated home. This
-    // metadata stores no credential and is never included in diagnostics.
     try {
-      const saved = JSON.parse(await readFile(this.threadPath, 'utf8'));
-      if (typeof saved.threadId === 'string' && saved.threadId.length < 200) this.threadId = saved.threadId;
-    } catch { /* A new installation starts a new conversation. */ }
-    this.event('status', this.status());
-    return this;
+      await mkdir(this.codexHome, { recursive: true, mode: 0o700 });
+      await mkdir(this.workspace, { recursive: true, mode: 0o700 });
+      await this.acquireProfileSession();
+      await this.local.start();
+      // Account credentials remain entirely in Codex's own isolated home. This
+      // metadata stores no credential and is never included in diagnostics.
+      try {
+        const saved = JSON.parse(await readFile(this.threadPath, 'utf8'));
+        if (typeof saved.threadId === 'string' && saved.threadId.length < 200) this.threadId = saved.threadId;
+      } catch { /* A new installation starts a new conversation. */ }
+      this.event('status', this.status());
+      this.resolveReady(this);
+      return this;
+    } catch (error) {
+      await this.releaseProfileSession();
+      this.rejectReady(error);
+      throw error;
+    }
   }
 
   async acquireProfileSession() {
@@ -428,7 +438,7 @@ export class Bridge {
 
   async handleUi(message) {
     if (!['string', 'number'].includes(typeof message.id) || typeof message.method !== 'string' || (message.params && typeof message.params !== 'object')) return;
-    try { this.write({ type: 'ui.response', id: message.id, result: await this.dispatch(message.method, message.params) }); }
+    try { await this.readyPromise; this.write({ type: 'ui.response', id: message.id, result: await this.dispatch(message.method, message.params) }); }
     catch (error) { this.write({ type: 'ui.response', id: message.id, error: publicError(error) }); this.report(error); }
   }
 

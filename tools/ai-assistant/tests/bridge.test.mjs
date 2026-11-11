@@ -65,6 +65,41 @@ test('UI request reaches official client API contract; picks dynamic catalog mod
   assert.equal(client.calls.filter(item => item.method === 'thread/resume').length, 0);
 });
 
+test('startup UI requests wait for private IPC readiness and restored profile metadata', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'IXRay delayed startup Кириллица '));
+  const client = new FakeClient(), messages = [];
+  const bridge = new Bridge({ sdkRoot: root, runtimeRoot: root, dataRoot: root, clientFactory: () => client, write: message => messages.push(message) });
+  let release;
+  bridge.local.start = () => new Promise(resolve => { release = resolve; });
+  bridge.local.close = async () => {};
+  t.after(async () => { await bridge.stop(); await rm(root, { recursive: true, force: true }); });
+  await mkdir(bridge.profileRoot, { recursive: true });
+  await writeFile(bridge.threadPath, JSON.stringify({ threadId: 'restored-before-ui' }));
+  const ui = bridge.handleUi({ type: 'ui.request', id: 'early-ui', method: 'auth.status', params: {} });
+  const starting = bridge.start();
+  while (!release) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(client.calls.length, 0); assert.equal(client.options, undefined);
+  assert.equal(messages.some(message => message.type === 'ui.response'), false);
+  release(); await starting; await ui;
+  assert.equal(bridge.threadId, 'restored-before-ui');
+  assert.ok(messages.find(message => message.type === 'ui.response' && message.id === 'early-ui').result.signedIn);
+  assert.ok(client.calls.find(call => call.method === 'thread/items/list' && call.params.threadId === 'restored-before-ui'));
+});
+
+test('startup failure rejects queued UI requests before launching Codex', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'IXRay failed startup '));
+  const client = new FakeClient(), messages = [];
+  const bridge = new Bridge({ sdkRoot: root, runtimeRoot: root, dataRoot: root, clientFactory: () => client, write: message => messages.push(message) });
+  bridge.local.start = async () => { throw Object.assign(new Error('Private pipe failed'), { code: 'PIPE_FAILED' }); };
+  bridge.local.close = async () => {};
+  t.after(async () => { await bridge.stop(); await rm(root, { recursive: true, force: true }); });
+  const ui = bridge.handleUi({ type: 'ui.request', id: 'early-ui', method: 'auth.status', params: {} });
+  await assert.rejects(bridge.start(), error => error.code === 'PIPE_FAILED'); await ui;
+  assert.equal(client.calls.length, 0); assert.equal(client.options, undefined);
+  assert.equal(messages.find(message => message.type === 'ui.response').error.code, 'PIPE_FAILED');
+  assert.equal(bridge.ownsProfileLock, false);
+});
+
 test('login has official managed browser/device flows; no API key or token-copy step', async t => {
   const { bridge, client, messages } = await setup(t);
   const browser = await bridge.dispatch('auth.login');

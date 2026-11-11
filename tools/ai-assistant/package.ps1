@@ -63,10 +63,11 @@ foreach ($Directory in @('gamedata','rawdata')) {
 Get-ChildItem $Root -File | Where-Object { $_.Name -like 'fs*.ltx' -or $_.Name -in 'ActorEditorLevel.cform','LICENSE.md' } | Copy-Item -Destination $Stage
 $Assistant = Join-Path $Stage 'tools/ai-assistant'
 New-Item -ItemType Directory -Force $Assistant | Out-Null
-foreach ($Name in @('src','package.json','package-lock.json','runtime-lock.json','codex-download.json','README_RU.txt','TEST_REPORT_RU.txt','CI_EVIDENCE.json','licenses')) {
+foreach ($Name in @('src','package.json','package-lock.json','runtime-lock.json','codex-download.json','assets-lock.json','prepare-assets.ps1','README_RU.txt','TEST_REPORT_RU.txt','CI_EVIDENCE.json','licenses')) {
     $Source = Join-Path $PSScriptRoot $Name
     if (Test-Path $Source) { Copy-Item $Source (Join-Path $Assistant $Name) -Recurse }
 }
+$AssetEvidence = & (Join-Path $PSScriptRoot 'prepare-assets.ps1') -Destination $Stage -CacheDirectory $Downloads
 $FixtureInstructions = Join-Path $PSScriptRoot 'fixtures/README_RU.txt'
 if (Test-Path $FixtureInstructions) {
     New-Item -ItemType Directory -Force (Join-Path $Assistant 'fixtures') | Out-Null
@@ -161,7 +162,7 @@ foreach ($Directory in $RuntimeDirectories) {
 foreach ($Name in @('Launch-LevelEditor.cmd','Rollback.cmd','Rollback.ps1')) {
     Copy-Item (Join-Path $PSScriptRoot $Name) $Stage
 }
-Write-Utf8Json @{ product='IXRay-AI-Assistant'; compatibilityLine='develop'; version=$Lock.version; upstream=$Lock.upstreamCommit; commit=$NativeCommit; integrationCommit=$IntegrationCommit; configuration='Release'; platform='Windows x64'; builtAt=[DateTime]::UtcNow.ToString('o'); node=$Lock.node.version; codex=$Lock.codex.version } (Join-Path $Stage 'build-info.json')
+Write-Utf8Json @{ product='IXRay-AI-Assistant'; compatibilityLine='develop'; version=$Lock.version; upstream=$Lock.upstreamCommit; commit=$NativeCommit; integrationCommit=$IntegrationCommit; assets=$AssetEvidence; configuration='Release'; platform='Windows x64'; builtAt=[DateTime]::UtcNow.ToString('o'); node=$Lock.node.version; codex=$Lock.codex.version } (Join-Path $Stage 'build-info.json')
 $Manifest = foreach ($File in Get-ChildItem $Stage -Recurse -File) {
     @{ path=$File.FullName.Substring($Stage.TrimEnd([IO.Path]::DirectorySeparatorChar).Length + 1).Replace('\','/'); sha256=(Get-Sha256Literal $File.FullName) }
 }

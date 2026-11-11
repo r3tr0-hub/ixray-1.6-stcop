@@ -212,6 +212,10 @@ xr_vector<CCustomObject*> AiSceneExecutor::Objects() const
 	xr_vector<CCustomObject*> Result;
 	for (auto It = Scene->FirstTool(); It != Scene->LastTool(); ++It)
 	{
+		if (It->first == OBJCLASS_DUMMY)
+		{
+			continue;
+		}
 		ESceneCustomOTool* Tool = smart_cast<ESceneCustomOTool*>(It->second);
 		if (Tool == nullptr)
 		{
@@ -268,6 +272,10 @@ AiSceneExecutor::Json AiSceneExecutor::Status()
 	size_t Count = 0;
 	for (auto It = Scene->FirstTool(); It != Scene->LastTool(); ++It)
 	{
+		if (It->first == OBJCLASS_DUMMY)
+		{
+			continue;
+		}
 		ESceneCustomOTool* Tool = smart_cast<ESceneCustomOTool*>(It->second);
 		if (Tool == nullptr)
 		{

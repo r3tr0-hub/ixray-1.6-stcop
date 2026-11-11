@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "repository": "https://github.com/ixray-team/ixray-multiplatform-assets",
+  "commit": "033fc863e6031517e734ef61ea90ad374467d2e6",
+  "archive": {
+    "url": "https://codeload.github.com/ixray-team/ixray-multiplatform-assets/zip/033fc863e6031517e734ef61ea90ad374467d2e6",
+    "sha256": "8ae951d76a29dcc5794f6cb51d2624706673151f0b3d692db9b547def1f6b45f"
+  },
+  "archivePrefix": "ixray-multiplatform-assets-033fc863e6031517e734ef61ea90ad374467d2e6/",
+  "variant": "gamedata_cop",
+  "license": {
+    "name": "CC BY-NC-SA 4.0",
+    "path": "LICENSE.txt",
+    "sha256": "047d2259741a3ebb30d8c8a43d4ba79b5b229a069acd1d2bea49f22b297d8e98"
+  },
+  "requiredLibraries": [
+    {
+      "path": "shaders_xrlc.xr",
+      "size": 4608,
+      "sha256": "f352705741e6595ed70a68e72b98769d3a35fae1ca7570118b1469503a94d1df"
+    },
+    {
+      "path": "shaders.xr",
+      "size": 191315,
+      "sha256": "526e9363e42764c56a39bae72de854d89d65dfc1fe9aca0231e576456b8720c9"
+    },
+    {
+      "path": "gamemtl.xr",
+      "size": 340984,
+      "sha256": "72d2d37c29116c672b5f9865e5c523664f7961ea17bd0c45aba848fc17d366c2"
+    },
+    {
+      "path": "lanims.xr",
+      "size": 15420,
+      "sha256": "7e8e2dbdd1c42a7374c9c68a50510586f140a71113e2851c87141e3beed0ea8a"
+    },
+    {
+      "path": "particles.xr",
+      "size": 1184775,
+      "sha256": "0786f7746df643a37b6420b652744270d1fdc15787740bad1c1c33b222a81037"
+    },
+    {
+      "path": "senvironment.xr",
+      "size": 794,
+      "sha256": "f8a857d6a6f17fae89ed5639c1995aaa6817acc54137993c263e889f1086dd4e"
+    }
+  ]
+}
