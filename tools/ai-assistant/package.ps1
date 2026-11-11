@@ -30,15 +30,25 @@ New-Item -ItemType Directory -Force -Path $Output,$Downloads | Out-Null
 function Write-Utf8Json($Value, $File, [int]$Depth = 5) {
     [IO.File]::WriteAllText($File, ($Value | ConvertTo-Json -Depth $Depth), [Text.UTF8Encoding]::new($false))
 }
+function Get-Sha256Literal([string]$File) {
+    if (-not (Test-Path -LiteralPath $File -PathType Leaf)) { throw "Cannot hash a missing file: $File" }
+    try {
+        $Digest = Get-FileHash -LiteralPath $File -Algorithm SHA256 -ErrorAction Stop
+    } catch {
+        throw ("Unable to hash file: $File. " + $_.Exception.Message)
+    }
+    if (-not $Digest -or [string]::IsNullOrWhiteSpace($Digest.Hash)) { throw "SHA-256 was not returned for file: $File" }
+    return ([string]$Digest.Hash).ToLowerInvariant()
+}
 if (Test-Path $Stage) { Remove-Item $Stage -Recurse -Force }
 New-Item -ItemType Directory -Path $Stage | Out-Null
 function Get-VerifiedArchive($Spec, $Name) {
     $File = Join-Path $Downloads $Name
-    if ((Test-Path $File) -and (Get-FileHash $File -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Spec.sha256) {
+    if ((Test-Path $File) -and (Get-Sha256Literal $File) -ne $Spec.sha256) {
         Remove-Item $File -Force
     }
     if (-not (Test-Path $File)) { Invoke-WebRequest -Uri $Spec.url -OutFile $File }
-    if ((Get-FileHash $File -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Spec.sha256) {
+    if ((Get-Sha256Literal $File) -ne $Spec.sha256) {
         throw "SHA-256 mismatch: $Name"
     }
     return $File
@@ -153,7 +163,7 @@ foreach ($Name in @('Launch-LevelEditor.cmd','Rollback.cmd','Rollback.ps1')) {
 }
 Write-Utf8Json @{ product='IXRay-AI-Assistant'; compatibilityLine='develop'; version=$Lock.version; upstream=$Lock.upstreamCommit; commit=$NativeCommit; integrationCommit=$IntegrationCommit; configuration='Release'; platform='Windows x64'; builtAt=[DateTime]::UtcNow.ToString('o'); node=$Lock.node.version; codex=$Lock.codex.version } (Join-Path $Stage 'build-info.json')
 $Manifest = foreach ($File in Get-ChildItem $Stage -Recurse -File) {
-    @{ path=$File.FullName.Substring($Stage.TrimEnd([IO.Path]::DirectorySeparatorChar).Length + 1).Replace('\','/'); sha256=(Get-FileHash $File.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+    @{ path=$File.FullName.Substring($Stage.TrimEnd([IO.Path]::DirectorySeparatorChar).Length + 1).Replace('\','/'); sha256=(Get-Sha256Literal $File.FullName) }
 }
 Write-Utf8Json @($Manifest) (Join-Path $Stage 'SHA256SUMS.json')
 Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath (Join-Path $Output 'IXRay-AI-Assistant-0.1.0-Windows-x64-Portable.zip') -Force
@@ -163,4 +173,4 @@ if (-not $SkipInstaller) {
     & $ISCC "/DStage=$Stage" "/DOutput=$Output" (Join-Path $PSScriptRoot 'installer.iss')
     if ($LASTEXITCODE) { throw 'Installer compilation failed.' }
 }
-Get-ChildItem $Output -File | ForEach-Object { Get-FileHash $_.FullName -Algorithm SHA256 } | Format-Table -AutoSize
+Get-ChildItem $Output -File | ForEach-Object { [pscustomobject]@{ Algorithm='SHA256'; Hash=(Get-Sha256Literal $_.FullName); Path=$_.FullName } } | Format-Table -AutoSize

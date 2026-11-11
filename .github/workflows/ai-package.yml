@@ -19,9 +19,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
       - name: Verify unchanged SDK source
         run: |
+          git fetch origin $env:NATIVE_COMMIT --depth=1
+          if ($LASTEXITCODE) { throw 'Unable to read the source revision of the native artifact.' }
           git diff --exit-code $env:NATIVE_COMMIT HEAD -- src cmake sdk CMakeLists.txt CMakePresets.json CMakeSettings.json NuGet.config gamedata rawdata fs.ltx fsfactory.ltx fsgame.ltx
           if ($LASTEXITCODE) { throw 'SDK source differs from the built revision; a full native rebuild is required.' }
       - name: Download coherent native Release binaries
@@ -41,7 +43,13 @@ jobs:
         run: |
           $Editors = @(Get-ChildItem build/reused-native -Recurse -File -Filter 'LevelEditor.exe')
           if ($Editors.Count -ne 1) { throw 'The artifact must contain exactly one complete editor binary set.' }
-          ./tools/ai-assistant/package.ps1 -BinaryDirectory $Editors[0].DirectoryName -NativeCommit $env:NATIVE_COMMIT
+          try {
+            ./tools/ai-assistant/package.ps1 -BinaryDirectory $Editors[0].DirectoryName -NativeCommit $env:NATIVE_COMMIT
+          } catch {
+            Write-Host $_.ScriptStackTrace
+            Write-Host $_.InvocationInfo.PositionMessage
+            throw
+          }
       - name: Verify installed editor, scene operations and rollback
         run: ./tools/ai-assistant/verify-package.ps1
       - name: Upload installer, portable package and evidence
