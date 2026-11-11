@@ -114,6 +114,9 @@ if (Test-Path $VsWhere) {
     }
 }
 if (-not $CrtFound) { throw 'App-local Microsoft VC143 x64 runtime is missing; install the Visual Studio 2022 C++ redist build component before packaging.' }
+# Each standalone child executable must resolve its own runtime on a clean PC.
+$RuntimeDirectories = @(Get-ChildItem $Runtime -Recurse -File -Filter '*.exe' | ForEach-Object DirectoryName | Sort-Object -Unique)
+foreach ($Directory in $RuntimeDirectories) { Copy-Item (Join-Path $CRT '*.dll') $Directory -Force }
 foreach ($Name in @('Launch-LevelEditor.cmd','Rollback.cmd','Rollback.ps1')) {
     Copy-Item (Join-Path $PSScriptRoot $Name) $Stage
 }

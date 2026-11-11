@@ -5,7 +5,7 @@ import { mkdtemp, rm, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { unzipSync, strFromU8 } from 'fflate';
-import { Bridge, whitelistedBuildInfo } from '../src/bridge.mjs';
+import { Bridge, whitelistedBuildInfo, validatedOfficialUrl } from '../src/bridge.mjs';
 
 class FakeClient extends EventEmitter {
   constructor() { super(); this.calls = []; this.signedIn = true; this.turn = 0; }
@@ -26,11 +26,11 @@ class FakeClient extends EventEmitter {
   async stop() { this.stopped = true; }
 }
 
-async function setup(t, client = new FakeClient(), { savedThread } = {}) {
+async function setup(t, client = new FakeClient(), { savedThread, nativeBrowser = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'IXRay тест с пробелами-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const messages = [], native = [];
-  const bridge = new Bridge({ sdkRoot: join(root, 'SDK с пробелами'), runtimeRoot: join(root, 'runtime'), dataRoot: root, clientFactory: () => client, openUrl: url => { messages.push({ opened: url }); }, write: message => {
+  const bridge = new Bridge({ sdkRoot: join(root, 'SDK с пробелами'), runtimeRoot: join(root, 'runtime'), dataRoot: root, clientFactory: () => client, ...(nativeBrowser ? {} : { openUrl: url => { messages.push({ opened: url }); } }), write: message => {
     messages.push(message);
     if (message.type === 'editor.request') {
       native.push(message);
@@ -75,6 +75,16 @@ test('login has official managed browser/device flows; no API key or token-copy 
   assert.deepEqual(client.calls.filter(item => item.method === 'account/login/start').map(item => item.params.type), ['chatgpt', 'chatgptDeviceCode']);
   await bridge.dispatch('auth.logout');
   await assert.rejects(bridge.dispatch('chat.send', { text: 'Команда' }), error => error.code === 'LOGIN_REQUIRED');
+});
+
+test('default browser handoff is a validated native event outside the managed child process job', async t => {
+  const { bridge, messages } = await setup(t, new FakeClient(), { nativeBrowser: true });
+  await bridge.dispatch('auth.login');
+  assert.deepEqual(messages.find(item => item.event === 'browser.open').params, { url: 'https://auth.openai.com/test' });
+  assert.equal(validatedOfficialUrl('https://chatgpt.com/codex/device'), 'https://chatgpt.com/codex/device');
+  for (const url of ['http://auth.openai.com/test', 'https://openai.com.attacker.invalid/test', 'javascript:alert(1)', 'file:///C:/Windows/system32/calc.exe', 'https://attacker.invalid']) {
+    assert.throws(() => validatedOfficialUrl(url), error => error.code === 'INVALID_AUTH_URL');
+  }
 });
 
 test('cancel interrupts active turn, forbids parallel send, and waits for confirmation event', async t => {

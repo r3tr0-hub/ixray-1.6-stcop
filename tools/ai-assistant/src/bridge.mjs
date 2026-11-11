@@ -2,7 +2,6 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile, rename, unlink, lstat, open } from 'node:fs/promises';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { spawn } from 'node:child_process';
 import { zipSync, strToU8 } from 'fflate';
 import { EditorChannel, LocalEditorServer, codedError } from './editor-channel.mjs';
 
@@ -47,27 +46,25 @@ function isProcessAlive(pid) {
   catch (error) { return error.code !== 'ESRCH'; }
 }
 
-function openOfficialUrl(url) {
+export function validatedOfficialUrl(url) {
   let parsed;
   try { parsed = new URL(url); } catch { throw codedError('INVALID_AUTH_URL', 'Клиент авторизации вернул некорректный адрес.'); }
   const allowed = ['openai.com', 'chatgpt.com'];
   if (parsed.protocol !== 'https:' || !allowed.some(domain => parsed.hostname === domain || parsed.hostname.endsWith(`.${domain}`))) {
     throw codedError('INVALID_AUTH_URL', 'Адрес входа не принадлежит официальному сервису OpenAI.');
   }
-  const command = process.platform === 'win32' ? join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'rundll32.exe') : process.platform === 'darwin' ? '/usr/bin/open' : '/usr/bin/xdg-open';
-  const args = process.platform === 'win32' ? ['url.dll,FileProtocolHandler', parsed.href] : [parsed.href];
-  const child = spawn(command, args, { windowsHide: true, shell: false, stdio: 'ignore' });
-  child.on('error', () => {});
-  child.unref();
+  return parsed.href;
 }
 
 export class Bridge {
-  constructor({ sdkRoot, runtimeRoot, write, clientFactory, dataRoot, openUrl = openOfficialUrl, editorTimeoutMs } = {}) {
+  constructor({ sdkRoot, runtimeRoot, write, clientFactory, dataRoot, openUrl, editorTimeoutMs } = {}) {
     this.sdkRoot = resolve(sdkRoot ?? join(Here, '../../..'));
     this.runtimeRoot = resolve(runtimeRoot ?? join(Here, '../runtime'));
     this.write = write ?? (message => process.stdout.write(JSON.stringify(message) + '\n'));
     this.clientFactory = clientFactory;
-    this.openUrl = openUrl;
+    // The editor opens the browser outside its managed service-process job.
+    // Closing LE must never terminate a browser launched for official sign-in.
+    this.openUrl = openUrl ?? (url => this.event('browser.open', { url }));
     const profile = createHash('sha256').update(process.platform === 'win32' ? this.sdkRoot.toLowerCase() : this.sdkRoot).digest('hex').slice(0, 24);
     this.profileRoot = join(dataRoot ?? process.env.LOCALAPPDATA ?? join(process.env.XDG_DATA_HOME ?? process.env.HOME ?? '.', '.local', 'share'), 'IXRay', 'AI', profile);
     this.codexHome = join(this.profileRoot, 'codex');
@@ -390,7 +387,7 @@ export class Bridge {
         const client = await this.ensureClient();
         const result = await client.request('account/login/start', { type: method === 'auth.login' ? 'chatgpt' : 'chatgptDeviceCode' });
         const url = result.authUrl ?? result.verificationUrl;
-        if (url) this.openUrl(url);
+        if (url) this.openUrl(validatedOfficialUrl(url));
         this.event('auth.login', result); return result;
       }
       case 'auth.logout': {

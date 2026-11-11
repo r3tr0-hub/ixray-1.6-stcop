@@ -453,6 +453,18 @@ void UIAiAssistant::Receive(const nlohmann::json& Data)
 			AddMessage("Ассистент", Delta, ItemId);
 		}
 	}
+	else if (Event == "browser.open")
+	{
+		xr_string Error;
+		if (!AiBridgeProcess::OpenOfficialUrl(AiString(Params, "url"), Error))
+		{
+			AddMessage("Ошибка входа", Error);
+		}
+		else
+		{
+			AuthStatus = "Ожидание входа в браузере…";
+		}
+	}
 	else if (Event == "chat.state")
 	{
 		const xr_string State = AiString(Params, "state");

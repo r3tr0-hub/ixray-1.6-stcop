@@ -17,6 +17,7 @@ public:
 	bool Send(const nlohmann::json& Message);
 	bool Poll(nlohmann::json& Message);
 	bool IsRunning() const;
+	static bool OpenOfficialUrl(const xr_string& Url, xr_string& Error);
 
 private:
 	AiBridgeProcessImpl* Impl = nullptr;

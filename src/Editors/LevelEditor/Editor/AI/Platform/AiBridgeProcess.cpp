@@ -11,12 +11,67 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <shellapi.h>
 
 namespace AiBridgePlatform
 {
 static constexpr size_t MaxMessageBytes = 32 * 1024 * 1024;
 static constexpr size_t MaxQueuedBytes = 64 * 1024 * 1024;
 static constexpr size_t MaxQueuedMessages = 256;
+
+static bool IsOfficialUrl(const xr_string& Url)
+{
+	if (Url.size() > 16384 || !Url.starts_with("https://"))
+	{
+		return false;
+	}
+	for (unsigned char Character : Url)
+	{
+		if (Character <= 32 || Character == 127 || Character == '\\')
+		{
+			return false;
+		}
+	}
+	const size_t AuthorityEnd = Url.find_first_of("/?#", 8);
+	xr_string Host = Url.substr(8, AuthorityEnd == xr_string::npos ? xr_string::npos : AuthorityEnd - 8);
+	if (Host.empty() || Host.size() > 253 || Host.front() == '.' || Host.back() == '.')
+	{
+		return false;
+	}
+	size_t LabelLength = 0;
+	char Previous = '.';
+	for (char& Character : Host)
+	{
+		if (Character >= 'A' && Character <= 'Z')
+		{
+			Character = Character - 'A' + 'a';
+		}
+		if (Character == '.')
+		{
+			if (LabelLength == 0 || Previous == '-')
+			{
+				return false;
+			}
+			LabelLength = 0;
+		}
+		else
+		{
+			// Userinfo, ports, percent-encoded hostnames and non-DNS characters
+			// are intentionally excluded from this browser-opening capability.
+			if (!((Character >= 'a' && Character <= 'z') || (Character >= '0' && Character <= '9') || Character == '-') ||
+				(LabelLength == 0 && Character == '-') || ++LabelLength > 63)
+			{
+				return false;
+			}
+		}
+		Previous = Character;
+	}
+	if (Previous == '-')
+	{
+		return false;
+	}
+	return Host == "openai.com" || Host.ends_with(".openai.com") || Host == "chatgpt.com" || Host.ends_with(".chatgpt.com");
+}
 
 class NativeHandle final
 {
@@ -477,4 +532,39 @@ bool AiBridgeProcess::Poll(nlohmann::json& Message)
 bool AiBridgeProcess::IsRunning() const
 {
 	return Impl->IsRunning();
+}
+
+bool AiBridgeProcess::OpenOfficialUrl(const xr_string& Url, xr_string& Error)
+{
+#ifdef _WIN32
+	if (!AiBridgePlatform::IsOfficialUrl(Url))
+	{
+		Error = "The browser URL must use HTTPS on an official OpenAI or ChatGPT hostname";
+		return false;
+	}
+	const int Length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, Url.data(), (int)Url.size(), nullptr, 0);
+	if (Length <= 0)
+	{
+		Error = "The official browser URL is not valid UTF-8";
+		return false;
+	}
+	std::wstring WideUrl(Length, L'\0');
+	if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, Url.data(), (int)Url.size(), WideUrl.data(), Length) != Length)
+	{
+		Error = "Unable to convert the official browser URL";
+		return false;
+	}
+	// Launch from the editor, outside the managed agent JobObject. Closing the
+	// assistant must never terminate the user's browser or an OAuth login tab.
+	const HINSTANCE Result = ShellExecuteW(nullptr, L"open", WideUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+	if (reinterpret_cast<intptr_t>(Result) <= 32)
+	{
+		Error = "Windows could not open the default browser for official sign-in";
+		return false;
+	}
+	return true;
+#else
+	Error = "Official browser sign-in in this package requires Windows x64";
+	return false;
+#endif
 }
