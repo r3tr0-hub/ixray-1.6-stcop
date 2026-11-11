@@ -34,6 +34,7 @@ public:
 	void SetCellDisabled(u64 Key, bool Disabled);
 	void EnableAll();
 	bool HasDisabledCells() const { return !DisabledCells.empty(); }
+	const xr_hash_set<u64>& GetDisabledCells() const { return DisabledCells; }
 
 	// Objects of the cells that can be seen: not disabled and, when streaming around the camera,
 	// within the streaming radius, plus objects spanning several cells. False when the lists are

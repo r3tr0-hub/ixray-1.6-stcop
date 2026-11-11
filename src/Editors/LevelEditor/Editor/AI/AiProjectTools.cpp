@@ -2,6 +2,10 @@
 #include "AiProjectTools.h"
 #include "AiText.h"
 #include "Editor/Utils/GitIntegration.h"
+#include "ShaderEditor/UIShaderEditorForm.h"
+#include "ShaderEditor/UI_shadertools.h"
+#include "../../../xrECore/Engine/XrGameMaterialLibraryEditors.h"
+#include "../../../../xrCore/SharedMaterialLibrary.h"
 
 #include <SDL3/SDL_filesystem.h>
 #include <SDL3/SDL_process.h>
@@ -11,6 +15,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <optional>
 
@@ -960,6 +965,219 @@ Json SelfTestMetadata(const Files::path& TestOutput)
 	return {{"ok", true}, {"metadata", Metadata}};
 }
 
+struct MaterialNumber
+{
+	const char* Key;
+	float SGameMtl::* Field;
+	float Min;
+	float Max;
+};
+
+static constexpr MaterialNumber MaterialNumbers[] = {
+	{"friction", &SGameMtl::fPHFriction, 0.f, 100.f},
+	{"damping", &SGameMtl::fPHDamping, 0.001f, 100.f},
+	{"spring", &SGameMtl::fPHSpring, 0.001f, 100.f},
+	{"bounce_start_velocity", &SGameMtl::fPHBounceStartVelocity, 0.f, 100.f},
+	{"bouncing", &SGameMtl::fPHBouncing, 0.f, 1.f},
+	{"bounce_damage", &SGameMtl::fBounceDamageFactor, 0.f, 100.f},
+	{"injurious_speed", &SGameMtl::fInjuriousSpeed, 0.f, 10000.f},
+	{"shoot_factor", &SGameMtl::fShootFactor, 0.f, 1.f},
+	{"shoot_factor_mp", &SGameMtl::fShootFactorMP, 0.f, 1.f},
+	{"transparency", &SGameMtl::fVisTransparencyFactor, 0.f, 1.f},
+	{"sound_occlusion", &SGameMtl::fSndOcclusionFactor, 0.f, 1.f},
+	{"flotation", &SGameMtl::fFlotationFactor, 0.f, 1.f},
+	{"density", &SGameMtl::fDensityFactor, 0.f, 1000.f},
+};
+
+struct MaterialFlag
+{
+	const char* Key;
+	u32 Mask;
+};
+
+static constexpr MaterialFlag MaterialFlags[] = {
+	{"passable", SGameMtl::flPassable},
+	{"climbable", SGameMtl::flClimable},
+	{"liquid", SGameMtl::flLiquid},
+	{"actor_obstacle", SGameMtl::flActorObstacle},
+	{"no_ricochet", SGameMtl::flNoRicoshet},
+};
+
+static Json DescribeGameMaterial(const SGameMtl& Item)
+{
+	Json Fields = {{"description", AiText::Utf8(Item.m_Desc.c_str()).c_str()}};
+	for (const auto& Field : MaterialNumbers)
+	{
+		Fields[Field.Key] = Item.*Field.Field;
+	}
+	for (const auto& Flag : MaterialFlags)
+	{
+		Fields[Flag.Key] = Item.Flags.test(Flag.Mask);
+	}
+	return {{"name", AiText::Utf8(Item.m_Name.c_str()).c_str()}, {"id", Item.ID}, {"flags", Item.Flags.get()}, {"values", std::move(Fields)}};
+}
+
+static Json DescribeSharedMaterial(const SSurfaceData& Item)
+{
+	return {{"name", AiText::Utf8(Item.m_Name.c_str()).c_str()},
+		{"texture", AiText::Utf8(Item.m_Texture.c_str()).c_str()},
+		{"shader", AiText::Utf8(Item.m_ShaderName.c_str()).c_str()},
+		{"compiler_shader", AiText::Utf8(Item.m_ShaderXRLCName.c_str()).c_str()},
+		{"game_material", AiText::Utf8(Item.m_GameMtlName.c_str()).c_str()},
+		{"two_sided", Item.m_Flags.test(SSurfaceData::sf2Sided)}};
+}
+
+static Json ReadGameMaterial(const Json& Input)
+{
+	const xr_string Kind = Text(Input, "kind", "game");
+	const xr_string Name = Text(Input, "name");
+	size_t Offset = 0;
+	size_t Limit = 100;
+	for (const char* Key : {"offset", "limit"})
+	{
+		const auto Value = Input.find(Key);
+		if (Value == Input.end())
+		{
+			continue;
+		}
+		const bool IsLimit = std::strcmp(Key, "limit") == 0;
+		if (!Value->is_number_integer() || Value->get<double>() < (IsLimit ? 1 : 0) || Value->get<double>() > (IsLimit ? 200 : 1000000))
+		{
+			return Error("INVALID_PAGE", "Use a nonnegative offset and limit from 1 through 200");
+		}
+		(IsLimit ? Limit : Offset) = Value->get<size_t>();
+	}
+	if (Input.contains("name") && Name.empty())
+	{
+		return Error("INVALID_MATERIAL", "Provide an exact nonempty material name");
+	}
+	Json Items = Json::array();
+	size_t Count = 0;
+	const auto Append = [&](auto&& Describe)
+	{
+		if (Count++ >= Offset && Items.size() < Limit)
+		{
+			Items.push_back(Describe());
+		}
+	};
+	if (Kind == "shared")
+	{
+		const auto& Library = CSharedMaterialLibrary::Instance().GetAllData();
+		xr_vector<const SSurfaceData*> Entries;
+		for (const auto& [Key, Item] : Library)
+		{
+			if (Name.empty() || Name == AiText::Utf8(Key.c_str()))
+			{
+				Entries.push_back(Item.get());
+			}
+		}
+		std::sort(Entries.begin(), Entries.end(), [](const auto* A, const auto* B)
+		{
+			return std::strcmp(A->m_Name.c_str(), B->m_Name.c_str()) < 0;
+		});
+		for (const auto* Item : Entries)
+		{
+			Append([&] { return DescribeSharedMaterial(*Item); });
+		}
+	}
+	else if (Kind == "game" && GameMaterialLibraryEditors)
+	{
+		for (auto It = GameMaterialLibraryEditors->FirstMaterial(); It != GameMaterialLibraryEditors->LastMaterial(); ++It)
+		{
+			if (Name.empty() || Name == AiText::Utf8((*It)->m_Name.c_str()))
+			{
+				Append([&] { return DescribeGameMaterial(**It); });
+			}
+		}
+	}
+	else
+	{
+		return Error("MATERIAL_LIBRARY_UNAVAILABLE", "Use a loaded game or shared material library");
+	}
+	const size_t Next = std::min(Offset, Count) + Items.size();
+	return {{"ok", true}, {"kind", Kind.c_str()}, {"items", std::move(Items)}, {"total", Count}, {"next_offset", Next}, {"has_more", Next < Count}};
+}
+
+static Json EditGameMaterial(const Json& Input)
+{
+	CShaderTool* Editor = UIShaderEditorForm::GetActiveTool();
+	ISHTools* Tool = Editor ? Editor->FindTools(aeMtl) : nullptr;
+	if (!Tool || !GameMaterialLibraryEditors)
+	{
+		return Error("GAME_MATERIAL_TAB_REQUIRED", "Open Shader Editor with scene_sdk_tab first");
+	}
+	const xr_string Action = Text(Input, "action");
+	if (Action == "save")
+	{
+		if (!Tool->Save())
+		{
+			return Error("GAME_MATERIAL_SAVE_FAILED", "SDK could not save the game material library");
+		}
+		return {{"ok", true}, {"saved", true}, {"includes_material_pairs", true}};
+	}
+	const xr_string Name = Text(Input, "name");
+	const auto Values = Input.find("values");
+	if (Action != "set" || Name.empty() || Values == Input.end() || !Values->is_object() || Values->empty())
+	{
+		return Error("INVALID_GAME_MATERIAL_EDIT", "Specify an exact material and supported fields to set");
+	}
+	SGameMtl* Target = nullptr;
+	for (auto It = GameMaterialLibraryEditors->FirstMaterial(); It != GameMaterialLibraryEditors->LastMaterial(); ++It)
+	{
+		if (Name == AiText::Utf8((*It)->m_Name.c_str()))
+		{
+			Target = *It;
+			break;
+		}
+	}
+	if (!Target)
+	{
+		return Error("GAME_MATERIAL_NOT_FOUND", "The named game material does not exist");
+	}
+	const auto& Fields = *Values;
+	for (auto It = Fields.begin(); It != Fields.end(); ++It)
+	{
+		const auto Number = std::find_if(std::begin(MaterialNumbers), std::end(MaterialNumbers), [&](const auto& Field) { return It.key() == Field.Key; });
+		const auto Flag = std::find_if(std::begin(MaterialFlags), std::end(MaterialFlags), [&](const auto& Field) { return It.key() == Field.Key; });
+		if ((Number != std::end(MaterialNumbers) && It->is_number() && It->get<double>() >= Number->Min && It->get<double>() <= Number->Max) ||
+			(Flag != std::end(MaterialFlags) && It->is_boolean()) ||
+			(It.key() == "description" && It->is_string() && It->get_ref<const Json::string_t&>().size() <= 512 &&
+				It->get_ref<const Json::string_t&>().find('\0') == Json::string_t::npos))
+		{
+			continue;
+		}
+		Json Failure = Error("INVALID_GAME_MATERIAL_FIELD", "Unsupported material field, type, or range");
+		Failure["field"] = It.key();
+		return Failure;
+	}
+	if (Editor->Current() != Tool)
+	{
+		Editor->OnChangeEditor(Tool);
+	}
+	Tool->SetCurrentItem(Target->m_Name.c_str(), true);
+	for (const auto& Field : MaterialNumbers)
+	{
+		if (Fields.contains(Field.Key))
+		{
+			Target->*Field.Field = Fields[Field.Key].get<float>();
+		}
+	}
+	for (const auto& Flag : MaterialFlags)
+	{
+		if (Fields.contains(Flag.Key))
+		{
+			Target->Flags.set(Flag.Mask, Fields[Flag.Key].get<bool>());
+		}
+	}
+	if (Fields.contains("description"))
+	{
+		Target->m_Desc = Text(Fields, "description").c_str();
+	}
+	Tool->Modified();
+	Editor->UpdateProperties();
+	return {{"ok", true}, {"saved", false}, {"material", DescribeGameMaterial(*Target)}};
+}
+
 std::optional<Json> Dispatch(const xr_string& Method, const Json& Params)
 {
 	if (Method == "scene.texture_thm" || Method == "scene.texture_thm_set")
@@ -981,6 +1199,14 @@ std::optional<Json> Dispatch(const xr_string& Method, const Json& Params)
 	if (Method == "scene.pack_status")
 	{
 		return Compressor().Status();
+	}
+	if (Method == "scene.game_material_read")
+	{
+		return ReadGameMaterial(Params);
+	}
+	if (Method == "scene.game_material_edit")
+	{
+		return EditGameMaterial(Params);
 	}
 	if (Method == "scene.git_read")
 	{

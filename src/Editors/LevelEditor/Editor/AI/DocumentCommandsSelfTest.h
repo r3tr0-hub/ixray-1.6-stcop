@@ -49,6 +49,39 @@ inline void SmokeTest(u64 RunId, TCall&& Call, TCheck&& Check)
 	};
 	const Json Macros = Call("scene.macro_document", {{"action", "read"}}, true);
 	Check("sdk_macros_read_native_graph", Ok(Macros) && Macros.value("total", 0) >= 1 && !Macros.value("commands", Json::array()).empty(), Macros);
+	if (Ok(Macros) && Macros.value("total", 0) == 1)
+	{
+		const auto Commands = Macros.value("commands", Json::array());
+		const auto Command = std::find_if(Commands.begin(), Commands.end(), [](const Json& Item)
+		{
+			return Item.value("mcp_runnable", false);
+		});
+		if (Command == Commands.end())
+		{
+			Check("sdk_macro_selection_command", false, Json::object());
+		}
+		else
+		{
+			const Json Add = Call("scene.macro_document", {{"action", "add_node"}, {"command", (*Command)["name"]}}, true);
+			if (Ok(Add))
+			{
+				const int NodeId = Add.value("node_id", 0);
+				const Json Link = Call("scene.macro_document", {{"action", "link"}, {"from", 1}, {"to", NodeId}}, true);
+				const Json Validation = Call("scene.macro_document", {{"action", "validate"}}, true);
+				const Json Run = Call("scene.macro_document", {{"action", "run"}}, true);
+				const bool UndidLink = !Ok(Link) || Ok(Call("scene.macro_document", {{"action", "undo"}}, true));
+				const bool UndidAdd = Ok(Call("scene.macro_document", {{"action", "undo"}}, true));
+				const Json Restored = Call("scene.macro_document", {{"action", "read"}}, true);
+				Check("sdk_macro_run_validated_native_graph", Ok(Link) && Ok(Validation) && Validation.value("runnable", false) && Ok(Run) &&
+					Run.value("reachable_nodes", 0) == 1 && UndidLink && UndidAdd && Restored.value("total", 0) == 1 &&
+					!Restored.value("modified", true), {{"link", Link}, {"validation", Validation}, {"run", Run}, {"restored", Restored}});
+			}
+			else
+			{
+				Check("sdk_macro_add_selection_command", false, Add);
+			}
+		}
+	}
 	const Json Layout = Call("scene.layout_document", {{"action", "read"}}, true);
 	Check("sdk_layout_read_native_widgets", Ok(Layout) && !Layout.value("types", Json::array()).empty(), Layout);
 
@@ -112,12 +145,19 @@ inline void SmokeTest(u64 RunId, TCall&& Call, TCheck&& Check)
 		return;
 	}
 	const Json DialogEdit = Call("scene.dialog_document", {{"action", "set_phrase"}, {"dialog", "ai_test"}, {"phrase", "0"}, {"value", "ai_new_text"}}, true);
+	const Json DialogAdd = Call("scene.dialog_document",
+		{{"action", "add_phrase"}, {"dialog", "ai_test"}, {"phrase", "branch_1"}, {"value", "ai_branch"}, {"branch", true}}, true);
+	const Json DialogLink = Call("scene.dialog_document", {{"action", "link"}, {"dialog", "ai_test"}, {"phrase", "0"}, {"target", "branch_1"}}, true);
+	const Json DialogMove = Call("scene.dialog_document", {{"action", "move_phrase"}, {"dialog", "ai_test"}, {"phrase", "branch_1"}, {"target", "0"}}, true);
 	const Json DialogSave = Call("scene.dialog_document", {{"action", "save"}}, true);
 	const Json DialogReload = Call("scene.dialog_document", {{"action", "reload"}}, true);
 	const Json DialogRead = Call("scene.dialog_document", {{"action", "read"}, {"dialog", "ai_test"}}, true);
 	const auto Phrases = DialogRead.value("phrases", Json::array());
-	Check("sdk_dialog_edit_save_reload", Ok(DialogOpen) && Ok(DialogEdit) && Ok(DialogSave) && Ok(DialogReload) &&
-		Phrases.size() == 1 && Phrases.front().value("text", "") == xr_string_view("ai_new_text"),
-		{{"open", DialogOpen}, {"edit", DialogEdit}, {"save", DialogSave}, {"reload", DialogReload}, {"read", DialogRead}});
+	Check("sdk_dialog_edit_save_reload", Ok(DialogOpen) && Ok(DialogEdit) && Ok(DialogAdd) && Ok(DialogLink) && Ok(DialogMove) &&
+		Ok(DialogSave) && Ok(DialogReload) && Phrases.size() == 2 && Phrases[0].value("id", "") == xr_string_view("branch_1") &&
+		Phrases[0].value("branch", false) && Phrases[1].value("text", "") == xr_string_view("ai_new_text") &&
+		Phrases[1].value("next", Json::array()) == Json::array({"branch_1"}),
+		{{"open", DialogOpen}, {"edit", DialogEdit}, {"add", DialogAdd}, {"link", DialogLink}, {"move", DialogMove},
+			{"save", DialogSave}, {"reload", DialogReload}, {"read", DialogRead}});
 }
 }

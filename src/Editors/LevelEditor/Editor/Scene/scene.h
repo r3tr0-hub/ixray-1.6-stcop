@@ -79,6 +79,7 @@ class EScene :
 	CMemoryWriter 	m_SaveCache;
 public:
 	st_LevelOptions	m_LevelOp;
+	void InvalidateGameGraphForLevelName();
 protected:
 	bool m_Valid;
 	bool m_SkipCantFindDialog;

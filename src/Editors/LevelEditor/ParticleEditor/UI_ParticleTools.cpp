@@ -913,9 +913,57 @@ void CParticleTool::SelectEffectForEditing(PS::CPEDef& Effect, EParticleAction* 
 void CParticleTool::CommitEffectEdit()
 {
 	CompileEffect(true);
+	m_EditPE->Compile(m_LibPED);
 	Modified();
 	RealUndoSave();
 	UpdateProperties();
+}
+
+PS::CPEDef* CParticleTool::CreateEffectForEditing(const char* Name, PS::CPEDef* Source)
+{
+	if (m_Flags.is(flUndoSave))
+	{
+		RealUndoSave();
+	}
+	StopCurrent(false);
+	ResetCurrent();
+
+	PS::CPEDef* Effect = RImplementation.PSLibrary.AppendPED(Source);
+	Effect->SetName(Name);
+	if (!Source)
+	{
+		Effect->m_MaxParticles = 1000;
+		for (PAPI::PActionEnum Type : {PAPI::PAKillOldID, PAPI::PASourceID, PAPI::PAMoveID})
+		{
+			EParticleAction* Action = pCreateEAction(Type);
+			Action->parent = Effect;
+			Effect->m_EActionList.push_back(Action);
+		}
+		Effect->CompileEditorActions();
+	}
+
+	// Record this library insertion before selecting it, as selection tracks a baseline.
+	if (EPrefs->scene_undo_level != 0)
+	{
+		CUndoJournal::State Parts;
+		for (EEditMode Kind : {emEffect, emGroup, emAnimCurve})
+		{
+			UndoJournal.Collect(Kind, Parts);
+		}
+		Parts.erase(std::remove_if(Parts.begin(), Parts.end(), [&](const CUndoJournal::SPart& Part)
+		{
+			return Part.Key == emEffect && Part.Name == Effect->m_Name;
+		}), Parts.end());
+		CMemoryWriter Writer;
+		Effect->Save(Writer);
+		CUndoJournal::Add(Parts, emEffect, Effect->m_Name, Writer);
+		UndoJournal.Commit(std::move(Parts), true);
+	}
+
+	SetCurrentPE(Effect);
+	m_bModified = true;
+	UpdateProperties(true);
+	return Effect;
 }
 
 void CParticleTool::SetCurrentPG(PS::CPGDef* P, PS::CPGDef::SEffect* Ef)

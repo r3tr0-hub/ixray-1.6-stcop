@@ -198,6 +198,7 @@ public:
     void 				SetCurrentPE		(PS::CPEDef* P, EParticleAction* CurrentPA = nullptr);
 	void                SelectEffectForEditing(PS::CPEDef& Effect, EParticleAction* Action = nullptr);
 	void                CommitEffectEdit();
+	PS::CPEDef*         CreateEffectForEditing(const char* Name, PS::CPEDef* Source);
     void				CommandJumpToItem	();
 
     // PG routine

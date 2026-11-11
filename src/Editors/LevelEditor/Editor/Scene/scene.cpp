@@ -684,7 +684,13 @@ void EScene::OnRTFlagsChange	(PropValue* sender)
 
 void EScene::OnNameChange(PropValue* sender)
 {
-	m_RTFlags.set(flIsBuildedGameGraph, false); m_game_graph.clear();
+	InvalidateGameGraphForLevelName();
+}
+
+void EScene::InvalidateGameGraphForLevelName()
+{
+	m_RTFlags.set(flIsBuildedGameGraph, false);
+	m_game_graph.clear();
 	EContext.UI->RedrawScene();
 }
 

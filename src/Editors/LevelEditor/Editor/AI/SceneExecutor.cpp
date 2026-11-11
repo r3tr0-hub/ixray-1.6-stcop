@@ -219,14 +219,14 @@ static constexpr const char* AiCompilerModes[] = {"geometry", "details", "ai_hig
 static bool AiIsExtendedSceneChange(const xr_string& Method)
 {
 	return Method == "scene.group_edit" || Method == "scene.way_edit" || Method == "scene.sector_edit" ||
-		Method == "scene.portal_edit" || Method == "scene.ai_map_edit" || Method == "scene.entity_set" || Method == "scene.entity_create";
+		Method == "scene.portal_edit" || Method == "scene.level_options_set" || Method == "scene.ai_map_edit" || Method == "scene.entity_set" || Method == "scene.entity_create";
 }
 
-static bool AiIsMutation(const xr_string& Method)
+bool AiSceneExecutor::IsMutation(const xr_string& Method)
 {
 	return AiIsExtendedSceneChange(Method) || AiContentEditors::IsMutation(Method) || AiDocuments::Handles(Method) ||
 		Method == "scene.partition_edit" || Method == "scene.texture_thm_set" || Method == "scene.texture_import" ||
-		Method == "scene.dcc_export_obj" || Method == "scene.git_write" || Method == "scene.plugin_run" || Method == "scene.pack_start" ||
+		Method == "scene.dcc_export_obj" || Method == "scene.game_material_edit" || Method == "scene.git_write" || Method == "scene.plugin_run" || Method == "scene.pack_start" ||
 		Method == "scene.select" || Method == "scene.focus" || Method == "scene.transform" || Method == "scene.duplicate" || Method == "scene.place" || Method == "scene.material_set" || Method == "scene.undo" || Method == "scene.redo" || Method == "scene.save_copy" || Method == "scene.sdk_run" || Method == "scene.sdk_tab" || Method == "scene.sdk_compile" || Method == "scene.object_edit" || Method == "scene.object_delete" || Method == "scene.level_open" || Method == "scene.level_new" || Method == "scene.level_save";
 }
 
@@ -449,7 +449,7 @@ bool AiSceneExecutor::FinishChange(const AiSceneSnapshot& Before, Json& Result)
 
 AiSceneExecutor::Json AiSceneExecutor::CancelOperation(const xr_string& Method, const Json& Params)
 {
-	if (!Params.is_object() || !AiIsMutation(Method) || !AiHasString(Params, "op_id", 128) || AiString(Params, "op_id").empty())
+	if (!Params.is_object() || !IsMutation(Method) || !AiHasString(Params, "op_id", 128) || AiString(Params, "op_id").empty())
 	{
 		return Error("OPERATION_CANCELLED", "The queued read was cancelled before execution");
 	}
@@ -527,12 +527,12 @@ AiSceneExecutor::Json AiSceneExecutor::Execute(const xr_string& Method, const Js
 	{
 		return Error("INVALID_PARAMS", "Parameters must be a JSON object");
 	}
-	const bool IsMutation = AiIsMutation(Method);
+	const bool Mutating = IsMutation(Method);
 	const xr_string OpId = AiString(Params, "op_id");
 	Json RequestParams = Params;
 	RequestParams.erase("deadline_ms");
 	const xr_string Request = (Json{{"method", Method.c_str()}, {"params", RequestParams}}.dump(-1, ' ', false, Json::error_handler_t::replace)).c_str();
-	if (IsMutation)
+	if (Mutating)
 	{
 		if (!AiHasString(Params, "op_id", 128) || OpId.empty())
 		{
@@ -582,16 +582,16 @@ AiSceneExecutor::Json AiSceneExecutor::Execute(const xr_string& Method, const Js
 	{
 		return Error("STALE_SCENE", "The scene has changed; query status and object IDs again");
 	}
-	if (IsMutation && !AiHasString(Params, "scene_session", 128))
+	if (Mutating && !AiHasString(Params, "scene_session", 128))
 	{
 		return Error("SCENE_SESSION_REQUIRED", "Query scene.status and include scene_session before changing the editor");
 	}
 	const bool StopPlay = Method == "scene.sdk_run" && AiString(Params, "action") == "play.stop";
-	const bool AllowsOtherTab = Method == "scene.sdk_tab" || AiContentEditors::Handles(Method) || AiDocuments::Handles(Method);
+	const bool AllowsOtherTab = Method == "scene.sdk_tab" || Method == "scene.game_material_edit" || AiContentEditors::Handles(Method) || AiDocuments::Handles(Method);
 	const bool EditableTab = AllowsOtherTab
 		? (EContext.UI->GetEState() == esEditScene || EContext.UI->GetEState() == esEditCustom)
 		: (EContext.UI->GetEState() == esEditScene && EContext.UI->ActiveTabIndex == 0);
-	if (IsMutation && !StopPlay && (!EditableTab || EContext.UI->IsMouseCaptured() || !EContext.UI->IsEnableInput || Scene->IsPlayInEditor()))
+	if (Mutating && !StopPlay && (!EditableTab || EContext.UI->IsMouseCaptured() || !EContext.UI->IsEnableInput || Scene->IsPlayInEditor()))
 	{
 		return Error("EDITOR_NOT_EDITABLE", "Open the appropriate editor tab and finish the current editing operation");
 	}
@@ -611,7 +611,7 @@ AiSceneExecutor::Json AiSceneExecutor::Execute(const xr_string& Method, const Js
 			Json Expired = Error("OPERATION_CANCELLED", "The command expired before execution; no change was made");
 			Expired["status"] = "cancelled";
 			Expired["op_id"] = OpId.c_str();
-			if (IsMutation)
+			if (Mutating)
 			{
 				Operations.emplace(OpId, Operation{Request, Expired});
 			}
@@ -619,14 +619,153 @@ AiSceneExecutor::Json AiSceneExecutor::Execute(const xr_string& Method, const Js
 		}
 	}
 	EditableObjectReadOnlyScope ReadOnlyLoad;
-	Json Result = Dispatch(Method, Params);
+	Json Result;
+	try
+	{
+		Result = Dispatch(Method, Params);
+	}
+	catch (const std::exception& Exception)
+	{
+		Msg("! SDK assistant command %s failed: %s", Method.c_str(), Exception.what());
+		Result = Error("SDK_OPERATION_EXCEPTION", "The SDK could not finish the operation. Inspect the editor log and read the current state before making further changes");
+		Result["status"] = "unknown";
+	}
 	Result["scene_session"] = Session.c_str();
 	Result["revision"] = Scene->GetModifyCount();
-	if (IsMutation)
+	if (Mutating)
 	{
 		Result["op_id"] = OpId.c_str();
 		Operations.emplace(OpId, Operation{Request, Result});
 	}
+	return Result;
+}
+
+static void AiBeforeInstanceEdit(CCustomObject* Object)
+{
+	// The static object change hook removes sector meshes before replacing a reference.
+	// Keep those memberships when only an instance property changes.
+	if (Object->FClassID == OBJCLASS_SCENEOBJECT)
+	{
+		g_LevelAutoBackup.Cancel();
+	}
+	else
+	{
+		Scene->BeforeObjectChange(Object);
+	}
+}
+
+static AiJson AiLevelOptions(const st_LevelOptions& Options)
+{
+	const b_params& Build = Options.m_BuildParams;
+	const char* Preset = Build.m_quality == ebqCustom ? "custom" : Build.m_quality == ebqDraft ? "draft" : "high";
+	return {{"build_name", AiText::Utf8(Options.m_FNLevelPath.c_str()).c_str()},
+		{"name_prefix", AiText::Utf8(Options.m_LevelPrefix.c_str()).c_str()},
+		{"map_version", AiText::Utf8(Options.m_map_version.c_str()).c_str()}, {"quality", Preset},
+		{"hemisphere_quality", Options.m_LightHemiQuality}, {"sun_quality", Options.m_LightSunQuality},
+		{"normal_smooth_degrees", Build.m_sm_angle}, {"weld_distance_m", Build.m_weld_distance},
+		{"lightmap_pixels_per_m", Build.m_lm_pixels_per_meter}, {"lightmap_error", Build.m_lm_rms},
+		{"lightmap_error_zero", Build.m_lm_rms_zero}, {"jitter_samples", Build.m_lm_jitter_samples}};
+}
+
+AiSceneExecutor::Json AiSceneExecutor::DispatchLevelOptions(const xr_string& Method, const Json& Params)
+{
+	if (Method == "scene.level_options")
+	{
+		return {{"ok", true}, {"options", AiLevelOptions(Scene->m_LevelOp)}};
+	}
+	const auto Changes = Params.find("changes");
+	if (Changes == Params.end() || !Changes->is_object() || Changes->empty())
+	{
+		return Error("INVALID_LEVEL_OPTIONS", "Provide at least one level option");
+	}
+	st_LevelOptions Updated = Scene->m_LevelOp;
+	if (Changes->contains("quality"))
+	{
+		const xr_string Preset = AiString(*Changes, "quality");
+		if (Preset == "draft")
+		{
+			Updated.SetDraftQuality();
+		}
+		else if (Preset == "high")
+		{
+			Updated.SetHighQuality();
+		}
+		else if (Preset == "custom")
+		{
+			Updated.SetCustomQuality();
+		}
+		else
+		{
+			return Error("INVALID_LEVEL_OPTIONS", "Quality must be draft, high or custom");
+		}
+	}
+	for (const auto& [Key, Value] : Changes->items())
+	{
+		if (Key == "quality")
+		{
+			continue;
+		}
+		if (Key == "build_name" || Key == "name_prefix" || Key == "map_version")
+		{
+			const xr_string Text = AiString(*Changes, Key.c_str());
+			const char* Alphabet = Key == "map_version" ? "0123456789." : "abcdefghijklmnopqrstuvwxyz0123456789_-";
+			if (Text.empty() || Text.size() > 96 || Text.find_first_not_of(Alphabet) != xr_string::npos)
+			{
+				return Error("INVALID_LEVEL_OPTIONS", "Use a safe build name, prefix, or numeric map version");
+			}
+			shared_str& Field = Key == "build_name" ? Updated.m_FNLevelPath : Key == "name_prefix" ? Updated.m_LevelPrefix : Updated.m_map_version;
+			Field = Text.c_str();
+			continue;
+		}
+		if (!Value.is_number() || !std::isfinite(Value.get<double>()) || Value.get<double>() < 0)
+		{
+			return Error("INVALID_LEVEL_OPTIONS", "Numeric level options must be finite and nonnegative");
+		}
+		const double Number = Value.get<double>();
+		if (Key == "normal_smooth_degrees" && Number <= 180)
+		{
+			Updated.m_BuildParams.m_sm_angle = float(Number);
+		}
+		else if (Key == "weld_distance_m" && Number <= 1)
+		{
+			Updated.m_BuildParams.m_weld_distance = float(Number);
+		}
+		else if (Key == "lightmap_pixels_per_m" && Number <= 20)
+		{
+			Updated.m_BuildParams.m_lm_pixels_per_meter = float(Number);
+		}
+		else if ((Key == "hemisphere_quality" || Key == "sun_quality") && Number <= 3 && Value.is_number_integer())
+		{
+			(Key == "hemisphere_quality" ? Updated.m_LightHemiQuality : Updated.m_LightSunQuality) = u8(Number);
+		}
+		else if ((Key == "lightmap_error" || Key == "lightmap_error_zero") && Number <= 255 && Value.is_number_integer())
+		{
+			(Key == "lightmap_error" ? Updated.m_BuildParams.m_lm_rms : Updated.m_BuildParams.m_lm_rms_zero) = u32(Number);
+		}
+		else if (Key == "jitter_samples" && Value.is_number_integer() && (Number == 1 || Number == 4 || Number == 9))
+		{
+			Updated.m_BuildParams.m_lm_jitter_samples = u32(Number);
+		}
+		else
+		{
+			return Error("INVALID_LEVEL_OPTIONS", "Unknown level option or value out of range");
+		}
+		Updated.SetCustomQuality();
+	}
+	const AiJson Verified = AiLevelOptions(Updated);
+	if (Verified == AiLevelOptions(Scene->m_LevelOp))
+	{
+		return {{"ok", true}, {"unchanged", true}, {"options", Verified}};
+	}
+	AiSceneSnapshot Before;
+	const bool NameChanged = Updated.m_FNLevelPath != Scene->m_LevelOp.m_FNLevelPath;
+	Scene->m_LevelOp = Updated;
+	if (NameChanged)
+	{
+		Scene->InvalidateGameGraphForLevelName();
+	}
+	Json Result = {{"options", Verified}};
+	FinishChange(Before, Result);
 	return Result;
 }
 
@@ -642,6 +781,10 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 	if (Json Result = DispatchPlugins(Method, Params); !Result.is_null())
 	{
 		return Result;
+	}
+	if (Method == "scene.level_options" || Method == "scene.level_options_set")
+	{
+		return DispatchLevelOptions(Method, Params);
 	}
 	if (Method == "scene.entity_get" || Method == "scene.entity_set" || Method == "scene.entity_create" || Method == "scene.spawn_sections")
 	{
@@ -1135,6 +1278,26 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 			{
 				return Error("DEPENDENT_OBJECT", "Ungroup or remove sector geometry and links before using the dedicated editor operation");
 			}
+			if (Target->FClassID == OBJCLASS_SCENEOBJECT)
+			{
+				auto* Model = static_cast<CSceneObject*>(Target);
+				auto* Sectors = Scene->GetOTool(OBJCLASS_SECTOR);
+				if (!Model->Meshes())
+				{
+					return Error("MODEL_UNAVAILABLE", "Load the model reference before removing the scene object");
+				}
+				if (Sectors != nullptr)
+				{
+					for (CCustomObject* Entry : Sectors->GetObjects())
+					{
+						const auto& Members = static_cast<CSector*>(Entry)->GetItems();
+						if (std::any_of(Members.begin(), Members.end(), [Model](const CSectorItem& Item) { return Item.GetSceneObject() == Model; }))
+						{
+							return Error("SECTOR_MEMBER", "Remove the model's meshes from the sector before removing the scene object");
+						}
+					}
+				}
+			}
 		}
 		AiSceneSnapshot Before;
 		const size_t Count = Targets.size();
@@ -1209,7 +1372,11 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 		{
 			return Error("SAVE_FAILED", "The staged scene was not created; inspect the editor log");
 		}
-		Json PartFiles = Json::array();
+		if (!AiFileWritten(StageParts / "world_partition.ltx"))
+		{
+			return Error("SAVE_PART_FAILED", "The world partition settings were not written to the staged level");
+		}
+		Json PartFiles = Json::array({"world_partition.ltx"});
 		for (auto It = Scene->FirstTool(); It != Scene->LastTool(); ++It)
 		{
 			ESceneToolBase* Tool = It->second;
@@ -1425,7 +1592,7 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 		Json Applied = Json::array();
 		for (size_t Index = 0; Index < Targets.size(); Index++)
 		{
-			Scene->BeforeObjectChange(Targets[Index]);
+			AiBeforeInstanceEdit(Targets[Index]);
 			Json Change = AiMaterials::ApplyPatch(*Targets[Index], (*Changes)[Index]);
 			if (!Change.value("ok", false))
 			{
@@ -1494,7 +1661,7 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 			return {{"ok", true}, {"unchanged", true}, {"object", Describe(Object)}};
 		}
 		AiSceneSnapshot Before;
-		Scene->BeforeObjectChange(Object);
+		AiBeforeInstanceEdit(Object);
 		if (Rename)
 		{
 			Object->SetName(Name.c_str());
@@ -1626,7 +1793,7 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 		for (CCustomObject* Object : Targets)
 		{
 			Json Previous = Describe(Object);
-			Scene->BeforeObjectChange(Object);
+			AiBeforeInstanceEdit(Object);
 			Object->UpdateTransform(true);
 			Fvector Position = Object->GetPosition();
 			Fvector Rotation = Object->GetRotation();
@@ -1647,7 +1814,17 @@ AiSceneExecutor::Json AiSceneExecutor::Dispatch(const xr_string& Method, const J
 			Changed.push_back({{"before", Previous}, {"after", Describe(Object)}});
 		}
 		Json Result = {{"changed", Changed}, {"transform_space", "world translation; Euler XYZ rotation delta; scaling about each object's pivot"}};
-		FinishChange(Before, Result);
+		if (FinishChange(Before, Result))
+		{
+			Scene->m_RTFlags.set(EScene::flIsBuildedCForm, false);
+			if (auto* Sectors = Scene->GetOTool(OBJCLASS_SECTOR))
+			{
+				for (CCustomObject* Sector : Sectors->GetObjects())
+				{
+					Sector->OnSceneUpdate();
+				}
+			}
+		}
 		return Result;
 	}
 	if (Method == "scene.duplicate")

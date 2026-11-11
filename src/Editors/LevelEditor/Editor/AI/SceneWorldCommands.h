@@ -29,6 +29,7 @@ static AiJson PartitionState()
 		{"enabled", GWorldPartition.IsEnabled()},
 		{"cell_size_m", GWorldPartition.GetCellSize()},
 		{"stream_around_camera", GWorldPartition.StreamAroundCamera},
+		{"unload_disabled", GWorldPartition.UnloadDisabled},
 		{"stream_radius_m", GWorldPartition.StreamRadius},
 		{"pending", GWorldPartition.GetPendingCount()}
 	};
@@ -140,10 +141,18 @@ inline AiSceneExecutor::Json AiSceneExecutor::DispatchWorld(const xr_string& Met
 
 		const auto& Cells = GWorldPartition.GetCells();
 		xr_vector<u64> Keys;
-		Keys.reserve(Cells.size());
+		const auto& Disabled = GWorldPartition.GetDisabledCells();
+		Keys.reserve(Cells.size() + Disabled.size());
 		for (const auto& [Key, Cell] : Cells)
 		{
 			Keys.push_back(Key);
+		}
+		for (u64 Key : Disabled)
+		{
+			if (!Cells.contains(Key))
+			{
+				Keys.push_back(Key);
+			}
 		}
 		std::sort(Keys.begin(), Keys.end(), [](u64 Left, u64 Right)
 		{
@@ -156,11 +165,11 @@ inline AiSceneExecutor::Json AiSceneExecutor::DispatchWorld(const xr_string& Met
 		for (size_t Index = std::min(Offset, End); Index < End; ++Index)
 		{
 			const u64 Key = Keys[Index];
-			const auto& Cell = Cells.at(Key);
+			const auto Cell = Cells.find(Key);
 			Items.push_back({
 				{"cell", {CWorldPartition::KeyX(Key), CWorldPartition::KeyZ(Key)}},
-				{"objects", Cell.Objects},
-				{"unloaded", Cell.Unloaded},
+				{"objects", Cell != Cells.end() ? Cell->second.Objects : 0},
+				{"unloaded", Cell != Cells.end() ? Cell->second.Unloaded : 0},
 				{"disabled", GWorldPartition.IsCellDisabled(Key)},
 				{"outside_stream_radius", GWorldPartition.IsCellStreamedOut(Key)}
 			});
@@ -458,6 +467,7 @@ inline AiSceneExecutor::Json AiSceneExecutor::DispatchWorld(const xr_string& Met
 		}
 		if (FinishChange(Before, Result))
 		{
+			Scene->m_RTFlags.set(EScene::flIsBuildedAIMap, false);
 			Result["map_revision"] = Scene->GetModifyCount();
 		}
 		return Result;
@@ -465,12 +475,14 @@ inline AiSceneExecutor::Json AiSceneExecutor::DispatchWorld(const xr_string& Met
 
 	if (Method == "scene.partition_edit")
 	{
+		bool PersistentChange = false;
 		if (Action == "enable" || Action == "disable")
 		{
 			GWorldPartition.SetEnabled(Action == "enable");
 		}
 		else if (Action == "enable_all")
 		{
+			PersistentChange = GWorldPartition.HasDisabledCells();
 			g_LevelAutoBackup.Cancel();
 			GWorldPartition.EnableAll();
 		}
@@ -482,8 +494,41 @@ inline AiSceneExecutor::Json AiSceneExecutor::DispatchWorld(const xr_string& Met
 			{
 				return Error("INVALID_CELL_SIZE", "Use a finite size between 8 and 100000 metres");
 			}
+			PersistentChange = Size->get<float>() != GWorldPartition.GetCellSize();
 			g_LevelAutoBackup.Cancel();
 			GWorldPartition.SetCellSize(Size->get<float>());
+		}
+		else if (Action == "set_streaming")
+		{
+			const auto Radius = Params.find("stream_radius_m");
+			if ((Params.contains("stream_around_camera") && !Params["stream_around_camera"].is_boolean()) ||
+				(Params.contains("unload_disabled") && !Params["unload_disabled"].is_boolean()) ||
+				(Radius != Params.end() && (!Radius->is_number() || !std::isfinite(Radius->get<double>()) ||
+					Radius->get<double>() < 25 || Radius->get<double>() > 5000)))
+			{
+				return Error("INVALID_STREAMING_SETTINGS", "Use boolean streaming flags and radius 25 to 5000 metres");
+			}
+			if (!Params.contains("stream_around_camera") && !Params.contains("unload_disabled") && Radius == Params.end())
+			{
+				return Error("MISSING_STREAMING_SETTINGS", "Specify at least one streaming setting to change");
+			}
+			g_LevelAutoBackup.Cancel();
+			GWorldPartition.StreamAroundCamera = Params.value("stream_around_camera", GWorldPartition.StreamAroundCamera);
+			GWorldPartition.UnloadDisabled = Params.value("unload_disabled", GWorldPartition.UnloadDisabled);
+			if (Radius != Params.end())
+			{
+				GWorldPartition.StreamRadius = Radius->get<float>();
+			}
+			GWorldPartition.MarkDirty();
+			GWorldPartition.Update();
+		}
+		else if (Action == "load_all")
+		{
+			GWorldPartition.UnloadDisabled = false;
+			GWorldPartition.StreamAroundCamera = false;
+			GWorldPartition.StreamInAll();
+			GWorldPartition.MarkDirty();
+			GWorldPartition.Update();
 		}
 		else if (Action == "set_cell" || Action == "focus")
 		{
@@ -516,13 +561,19 @@ inline AiSceneExecutor::Json AiSceneExecutor::DispatchWorld(const xr_string& Met
 				{
 					return Error("INVALID_CELL", "Specify disabled=true or disabled=false");
 				}
+				PersistentChange = GWorldPartition.IsCellDisabled(Key) != Disabled->get<bool>();
 				g_LevelAutoBackup.Cancel();
 				GWorldPartition.SetCellDisabled(Key, Disabled->get<bool>());
+				if (PersistentChange)
+				{
+					Scene->m_RTFlags.set(EScene::flRT_Unsaved, true);
+				}
 				GWorldPartition.Apply();
 			}
 			Json Result = AiWorld::PartitionState();
 			Result["cell"] = Json::array({X, Z});
 			Result["disabled"] = GWorldPartition.IsCellDisabled(Key);
+			Result["level_save_required"] = PersistentChange;
 			Result["undoable"] = false;
 			return Result;
 		}
@@ -530,8 +581,13 @@ inline AiSceneExecutor::Json AiSceneExecutor::DispatchWorld(const xr_string& Met
 		{
 			return Error("UNKNOWN_ACTION", "Use a supported world partition action");
 		}
+		if (PersistentChange)
+		{
+			Scene->m_RTFlags.set(EScene::flRT_Unsaved, true);
+		}
 		GWorldPartition.Apply();
 		Json Result = AiWorld::PartitionState();
+		Result["level_save_required"] = PersistentChange;
 		Result["undoable"] = false;
 		return Result;
 	}
@@ -547,17 +603,18 @@ inline AiSceneExecutor::Json AiSceneExecutor::DispatchWorld(const xr_string& Met
 
 	const bool Editing = Method.ends_with("_edit");
 	const bool Creating = Editing && Action == "create";
+	const bool CalculatesPortal = IsPortal && Editing && Action == "calculate";
 	const ObjClassID ClassId = IsGroup ? OBJCLASS_GROUP : IsWay ? OBJCLASS_WAY : IsSector ? OBJCLASS_SECTOR : OBJCLASS_PORTAL;
 	CCustomObject* Object = nullptr;
 	string256 Name = {};
-	if (Creating)
+	if (Creating || CalculatesPortal)
 	{
 		ESceneCustomOTool* Tool = Scene->GetOTool(ClassId);
 		if (Tool == nullptr || !Tool->IsEnabled() || !Tool->IsEditable())
 		{
 			return Error("TOOL_NOT_EDITABLE", "The SDK object tool is unavailable or locked");
 		}
-		if (Params.contains("name"))
+		if (Creating && Params.contains("name"))
 		{
 			const xr_string RequestedName = AiString(Params, "name");
 			if (!AiWorld::IsName(RequestedName))
@@ -573,7 +630,7 @@ inline AiSceneExecutor::Json AiSceneExecutor::DispatchWorld(const xr_string& Met
 			}
 			xr_strcpy(Name, RequestedName.c_str());
 		}
-		else
+		else if (Creating)
 		{
 			Scene->GenObjectName(ClassId, Name);
 		}
@@ -618,7 +675,11 @@ inline AiSceneExecutor::Json AiSceneExecutor::DispatchWorld(const xr_string& Met
 					Items.push_back(Describe(Member));
 				}
 			}
-			Json Result = {{"ok", true}, {"object", Describe(Group)}};
+			const bool CanUngroup = AiWorld::IsEditable(Group) && std::all_of(Members.begin(), Members.end(), [](CCustomObject* Member)
+			{
+				return AiWorld::IsEditable(Member, true);
+			});
+			Json Result = {{"ok", true}, {"object", Describe(Group)}, {"can_ungroup", CanUngroup}};
 			AiWorld::SetPage(Result, "members", std::move(Items), Members.size(), Offset);
 			return Result;
 		}
@@ -1065,6 +1126,80 @@ inline AiSceneExecutor::Json AiSceneExecutor::DispatchWorld(const xr_string& Met
 	if (!Editing)
 	{
 		return DescribePortal(Portal);
+	}
+	if (CalculatesPortal)
+	{
+		auto* Front = smart_cast<CSector*>(Find(AiString(Params, "front_id")));
+		auto* Back = smart_cast<CSector*>(Find(AiString(Params, "back_id")));
+		if (Front == nullptr || Back == nullptr || Front == Back)
+		{
+			return Error("INVALID_PORTAL_SECTORS", "Specify two different sectors");
+		}
+		if (Params.contains("replace_existing") && !Params["replace_existing"].is_boolean())
+		{
+			return Error("INVALID_REPLACE_FLAG", "Specify replace_existing as a boolean");
+		}
+		const bool ReplaceExisting = Params.value("replace_existing", false);
+		xr_hash_set<CPortal*> Existing;
+		xr_vector<CPortal*> Replace;
+		for (auto It = Scene->FirstObj(OBJCLASS_PORTAL); It != Scene->LastObj(OBJCLASS_PORTAL); ++It)
+		{
+			auto* Current = static_cast<CPortal*>(*It);
+			Existing.insert(Current);
+			if ((Current->SectorFront() == Front && Current->SectorBack() == Back) ||
+				(Current->SectorFront() == Back && Current->SectorBack() == Front))
+			{
+				if (!ReplaceExisting)
+				{
+					return Error("PORTALS_ALREADY_EXIST", "Set replace_existing to regenerate this sector pair");
+				}
+				if (!AiWorld::IsEditable(Current))
+				{
+					return Error("PORTAL_NOT_EDITABLE", "A portal between these sectors is locked or disabled");
+				}
+				Replace.push_back(Current);
+			}
+		}
+		g_LevelAutoBackup.Cancel();
+		AiSceneSnapshot Before;
+		const int Created = PortalUtils.CalculatePortalPair(Front, Back);
+		if (Created == -2)
+		{
+			Before.Restore();
+			Synchronize();
+			return Error("PORTAL_CALCULATION_CANCELLED", "The SDK interrupted portal calculation");
+		}
+		if (Created < 0)
+		{
+			return Error("PORTAL_GEOMETRY_UNAVAILABLE", "Both sectors need loaded static meshes for portal calculation");
+		}
+		if (Created == 0)
+		{
+			return Error("NO_PORTALS_FOUND", "The SDK found no valid shared portal boundary");
+		}
+		for (CPortal* Current : Replace)
+		{
+			Scene->RemoveObject(Current, false, true);
+			const auto Known = ByObject.find(Current);
+			if (Known != ByObject.end())
+			{
+				ById.erase(Known->second);
+				ByObject.erase(Known);
+			}
+			xr_delete(Current);
+		}
+		Json Items = Json::array();
+		for (auto It = Scene->FirstObj(OBJCLASS_PORTAL); It != Scene->LastObj(OBJCLASS_PORTAL) && Items.size() < 128; ++It)
+		{
+			auto* Current = static_cast<CPortal*>(*It);
+			if (!Existing.contains(Current))
+			{
+				Items.push_back(DescribePortal(Current));
+			}
+		}
+		Json Result = {{"created_count", Created}, {"replaced_count", Replace.size()}, {"created", std::move(Items)}, {"more_created", Created > 128}};
+		FinishChange(Before, Result);
+		return Result;
 	}
 	if (Action == "invert")
 	{

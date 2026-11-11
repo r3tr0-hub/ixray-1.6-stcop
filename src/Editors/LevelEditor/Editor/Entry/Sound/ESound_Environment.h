@@ -2,6 +2,7 @@
 
 class ESoundEnvironment: public CEditShape
 {
+	friend class AiLevelEntityAccess;
 	typedef CCustomObject inherited;
 
 	friend class		CLevelSoundManager;

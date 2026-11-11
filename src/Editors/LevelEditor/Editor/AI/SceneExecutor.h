@@ -8,6 +8,7 @@ class AiSceneExecutor final
 {
 public:
 	AiSceneExecutor();
+	static bool IsMutation(const xr_string& Method);
 	~AiSceneExecutor() = default;
 	nlohmann::json Execute(const xr_string& Method, const nlohmann::json& Params);
 	nlohmann::json CancelOperation(const xr_string& Method, const nlohmann::json& Params);
@@ -23,6 +24,7 @@ private:
 
 	Json DispatchWorld(const xr_string& Method, const Json& Params);
 	Json DispatchLevelEntity(const xr_string& Method, const Json& Params);
+	Json DispatchLevelOptions(const xr_string& Method, const Json& Params);
 	Json DispatchPlugins(const xr_string& Method, const Json& Params);
 	Json Dispatch(const xr_string& Method, const Json& Params);
 	Json Error(const char* Code, const char* Message) const;

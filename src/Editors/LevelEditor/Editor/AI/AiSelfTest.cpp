@@ -2,6 +2,7 @@
 #include "AiSelfTest.h"
 #include "SceneExecutor.h"
 #include "AiProjectTools.h"
+#include "ContentEditorCommandsSelfTest.h"
 #include "DocumentCommandsSelfTest.h"
 
 #include <chrono>
@@ -393,6 +394,47 @@ private:
 					[this](const char* Name, bool Passed, Json Details) { Check(Name, Passed, std::move(Details)); });
 				break;
 			}
+			case 16:
+			{
+				const Json Options = Call("scene.level_options_set", {{"changes", {{"name_prefix", "ai_sdk_verified"}}}}, true);
+				Check("sdk_level_build_options", IsOk(Options) && Options.value("options", Json::object()).value("name_prefix", "") == std::string_view("ai_sdk_verified"), Options);
+				const Json Cell = Call("scene.partition_edit", {{"action", "set_cell"}, {"cell", {1000, -1000}}, {"disabled", true}}, true);
+				Check("sdk_partition_mask_changed", IsOk(Cell) && Cell.value("disabled", false), Cell);
+				FullSavePath = RunDirectory / "expanded sdk.level";
+				const auto Utf8 = FullSavePath.u8string();
+				const Json Saved = Call("scene.level_save", {{"path", reinterpret_cast<const char*>(Utf8.c_str())}}, true);
+				Check("sdk_level_save_creates_and_adopts_file", IsOk(Saved) && !Call("scene.status").value("unsaved", true), Saved);
+				break;
+			}
+			case 17:
+			{
+				const Json CubeId = Cube().value("id", Json());
+				const Json Rename = Call("scene.object_edit", {{"object_id", CubeId}, {"name", "ai_saved_cube"}}, true);
+				Check("sdk_prepare_inplace_save", IsOk(Rename), Rename);
+				const Json Saved = Call("scene.level_save", Json::object(), true);
+				Check("sdk_level_save_replaces_current_parts", IsOk(Saved) && !Call("scene.status").value("unsaved", true), Saved);
+				const auto Utf8 = FullSavePath.u8string();
+				const Json Open = Call("scene.level_open", {{"path", reinterpret_cast<const char*>(Utf8.c_str())}}, true);
+				LoadOperation = String(Open, "op_id");
+				Check("sdk_level_open_started", IsOk(Open) && !LoadOperation.empty(), Open);
+				break;
+			}
+			case 18:
+			{
+				const Json Open = Call("scene.operation_status", {{"op_id", LoadOperation.c_str()}});
+				Check("sdk_level_open_completion_verified", Open.value("result", Json::object()).value("completion_verified", false) && Open.value("result", Json::object()).value("ok", false), Open);
+				const Json Found = Call("scene.search", {{"name", "ai_saved_cube"}});
+				Check("sdk_reopen_preserves_objects", IsOk(Found) && Found.value("objects", Json::array()).size() == 1, Found);
+				const Json Partition = Call("scene.partition_read");
+				Check("sdk_reopen_preserves_world_partition", IsOk(Partition) && GWorldPartition.IsCellDisabled(CWorldPartition::MakeKey(1000, -1000)), Partition);
+				break;
+			}
+			case 19:
+			{
+				const Json Particle = AiContentEditors::CheckParticleWorkflow(StartedAt);
+				Check("sdk_particle_create_edit_save_reopen_undo", IsOk(Particle), Particle);
+				break;
+			}
 			default:
 			{
 				Complete();
@@ -408,6 +450,8 @@ private:
 	std::filesystem::path RunDirectory;
 	std::filesystem::path LibraryPath;
 	std::filesystem::path CopyPath;
+	std::filesystem::path FullSavePath;
+	xr_string LoadOperation;
 	xr_vector<u8> OriginalLibrary;
 	xr_string InitialSession;
 	xr_string InitialId;

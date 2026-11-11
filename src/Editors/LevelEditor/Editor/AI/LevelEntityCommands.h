@@ -3,6 +3,7 @@
 #include "Editor/Entry/Light/ELight.h"
 #include "Editor/Entry/Sound/ESound_Source.h"
 #include "Editor/Entry/Spawn/SpawnPoint.h"
+#include "Editor/Entry/Planars/planar.h"
 #include "Editor/Entry/Terrain/Terrain.h"
 #include "Editor/Tools/Details/ESceneDOTools.h"
 #include "Editor/Tools/Spawn/ESceneSpawnTools.h"
@@ -76,27 +77,38 @@ inline bool Unsigned(const AiJson& Params, const char* Key, u32 Min, u32 Max, u3
 	return true;
 }
 
-inline bool SoundResource(const AiJson& Data, const char* Key, xr_string& Name)
+inline bool ResourceName(const AiJson& Data, const char* Key, xr_string& Name)
 {
 	if (!AiHasString(Data, Key, 200))
 	{
 		return false;
 	}
+	const auto& Raw = Data[Key].get_ref<const AiJson::string_t&>();
 	Name = AiString(Data, Key);
-	if (Name.empty() || Name.find("..") != xr_string::npos || Name.front() == '/' || Name.front() == '\\')
+	if (Name.empty() || Name.size() != Raw.size() || Name.find("..") != xr_string::npos ||
+		Name.front() == '/' || Name.front() == '\\' || Name.back() == '/' || Name.back() == '\\')
 	{
 		return false;
 	}
 	for (char& Character : Name)
 	{
-		if (Character == '/')
-		{
-			Character = '\\';
-		}
 		if ((u8)Character < 32 || Character == ':' || Character == '?' || Character == '*' || Character == '"' || Character == '<' || Character == '>' || Character == '|')
 		{
 			return false;
 		}
+		if (Character == '/')
+		{
+			Character = '\\';
+		}
+	}
+	return true;
+}
+
+inline bool SoundResource(const AiJson& Data, const char* Key, xr_string& Name)
+{
+	if (!ResourceName(Data, Key, Name))
+	{
+		return false;
 	}
 	if (Name.ends_with(".ogg"))
 	{
@@ -104,6 +116,187 @@ inline bool SoundResource(const AiJson& Data, const char* Key, xr_string& Name)
 	}
 	string_path Path;
 	return !Name.empty() && FS.path_exist(_game_sounds_) && FS.exist(Path, _game_sounds_, Name.c_str(), ".ogg");
+}
+
+inline bool ParticleResource(const AiJson& Data, const char* Key, xr_string& Name)
+{
+	if (!ResourceName(Data, Key, Name))
+	{
+		return false;
+	}
+	auto& Library = RImplementation.PSLibrary;
+	if (Library.FindPED(Name.c_str()))
+	{
+		return true;
+	}
+	const PS::CPGDef* Group = Library.FindPGD(Name.c_str());
+	if (!Group)
+	{
+		return false;
+	}
+	using Effect = PS::CPGDef::SEffect;
+	auto EffectExists = [&](const shared_str& Reference)
+	{
+		return Reference.size() != 0 && Library.FindPED(Reference.c_str()) != nullptr;
+	};
+	for (const Effect* Entry : Group->m_Effects)
+	{
+		if (!Entry || !EffectExists(Entry->m_EffectName) ||
+			(Entry->m_Flags.is(Effect::flOnPlayChild) && !EffectExists(Entry->m_OnPlayChildName)) ||
+			(Entry->m_Flags.is(Effect::flOnBirthChild) && !EffectExists(Entry->m_OnBirthChildName)) ||
+			(Entry->m_Flags.is(Effect::flOnDeadChild) && !EffectExists(Entry->m_OnDeadChildName)))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+inline bool SoundEnvironmentName(const AiJson& Data, const char* Key, xr_string& Name)
+{
+	if (!AiHasString(Data, Key, 200))
+	{
+		return false;
+	}
+	const auto& Raw = Data[Key].get_ref<const AiJson::string_t&>();
+	if (Raw.empty())
+	{
+		Name.clear();
+		return true;
+	}
+	if (Raw.find('\0') != AiJson::string_t::npos || !SndLib)
+	{
+		return false;
+	}
+	AStringVec Entries;
+	SndLib->GetSoundEnvs(Entries);
+	for (const xr_string& Entry : Entries)
+	{
+		if (AiText::Utf8(Entry.c_str()).c_str() == Raw)
+		{
+			Name = Entry;
+			return true;
+		}
+	}
+	return false;
+}
+
+inline bool BoxSize(const AiJson& Data, Fvector& Size)
+{
+	return AiVector(Data, "size_m", Size, 1, 100000) && Size.x >= 0.001f && Size.y >= 0.001f && Size.z >= 0.001f;
+}
+
+inline AiJson ShapeDetails(CEditShape& Shape, const char* Kind)
+{
+	AiJson Primitives = AiJson::array();
+	const auto& Shapes = Shape.GetShapes();
+	for (const CShapeData::shape_def& Primitive : Shapes)
+	{
+		if (Primitives.size() >= 128)
+		{
+			break;
+		}
+		if (Primitive.type == CShapeData::cfSphere)
+		{
+			Primitives.push_back({{"type", "sphere"}, {"local_center", AiVectorJson(Primitive.data.sphere.P)},
+				{"local_radius", Primitive.data.sphere.R}, {"radius_m", Primitive.data.sphere.R * Shape.GetScale().x}});
+		}
+		else if (Primitive.type == CShapeData::cfBox)
+		{
+			const Fmatrix& Matrix = Primitive.data.box;
+			Primitives.push_back({{"type", "box"}, {"local_center", AiVectorJson(Matrix.c)},
+				{"local_axis_x", AiVectorJson(Matrix.i)}, {"local_axis_y", AiVectorJson(Matrix.j)}, {"local_axis_z", AiVectorJson(Matrix.k)}});
+		}
+	}
+	return {{"kind", Kind}, {"primitive_count", Shapes.size()}, {"primitives", Primitives}, {"scale", AiVectorJson(Shape.GetScale())}};
+}
+
+inline bool SetShape(CEditShape& Shape, const AiJson& Changes, bool Write)
+{
+	if (!OnlyKeys(Changes, {"radius_m", "size_m"}) || Shape.GetShapes().size() != 1)
+	{
+		return false;
+	}
+	auto& Primitive = Shape.GetShapes().front();
+	if (Primitive.type == CShapeData::cfSphere)
+	{
+		float Radius = Primitive.data.sphere.R * Shape.GetScale().x;
+		const float Scale = Shape.GetScale().x;
+		if (Changes.contains("size_m") || !std::isfinite(Scale) || Scale <= 0 || !ApplyNumbers(Changes, {{"radius_m", &Radius, 0.001f, 100000}}, true))
+		{
+			return false;
+		}
+		if (Write)
+		{
+			Primitive.data.sphere.R = Radius / Scale;
+			Shape.ComputeBounds();
+			Shape.UpdateTransform();
+		}
+		return true;
+	}
+	Fvector Size;
+	if (Primitive.type != CShapeData::cfBox || Changes.contains("radius_m") || !BoxSize(Changes, Size))
+	{
+		return false;
+	}
+	// Replace absolute box dimensions only where the local box is the editor's standard unit box.
+	const Fmatrix& Box = Primitive.data.box;
+	if (!Box.i.similar(Fvector().set(1, 0, 0)) || !Box.j.similar(Fvector().set(0, 1, 0)) || !Box.k.similar(Fvector().set(0, 0, 1)))
+	{
+		return false;
+	}
+	if (Write)
+	{
+		Shape.NumSetScale(Size);
+	}
+	return true;
+}
+
+inline bool SetPlanar(CPlanar& Planar, const AiJson& Changes, bool Write)
+{
+	if (!OnlyKeys(Changes, {"size_m", "stiffness"}) ||
+		!ApplyNumbers(Changes, {{"stiffness", &Planar.m_Stiffness, 0, 1}}, Write) ||
+		(Changes.contains("size_m") && !SetShape(Planar, {{"size_m", Changes["size_m"]}}, Write)))
+	{
+		return false;
+	}
+	if (Write)
+	{
+		Planar.OnUpdateTransform();
+	}
+	return true;
+}
+
+inline bool SetFog(EFogVolume& Fog, const AiJson& Changes, bool Write)
+{
+	if (!OnlyKeys(Changes, {"size_m", "fog_kind", "fog_profile"}) ||
+		(Changes.contains("fog_kind") && !Changes["fog_kind"].is_string()) ||
+		(Changes.contains("size_m") && !SetShape(Fog, {{"size_m", Changes["size_m"]}}, Write)))
+	{
+		return false;
+	}
+	const xr_string Kind = AiString(Changes, "fog_kind", Fog.m_volumeType == fvEmitter ? "emitter" : "occlusion");
+	if (Kind != "emitter" && Kind != "occlusion")
+	{
+		return false;
+	}
+	xr_string Profile;
+	string_path Path;
+	if (Changes.contains("fog_profile") && (Kind != "emitter" || !ResourceName(Changes, "fog_profile", Profile) ||
+		!Profile.ends_with(".ltx") || !FS.path_exist(_game_config_) || !FS.exist(Path, _game_config_, Profile.c_str())))
+	{
+		return false;
+	}
+	if (Write)
+	{
+		Fog.m_volumeType = Kind == "emitter" ? fvEmitter : fvOcclusion;
+		Fog.SetDrawColor(Fog.m_volumeType == fvEmitter ? 0x205050FF : 0x2050A050, 0xFF202020);
+		if (!Profile.empty())
+		{
+			Fog.m_volume_profile = Profile.c_str();
+		}
+	}
+	return true;
 }
 
 inline bool SpawnSection(const xr_string& Section)
@@ -193,8 +386,15 @@ inline AiJson SpawnDetails(CSpawnPoint& Spawn)
 {
 	if (CSE_Abstract* Entity = Spawn.m_SpawnData.GetEntity())
 	{
-		return {{"kind", "spawn"}, {"section", AiText::Utf8(Entity->name()).c_str()}, {"respawn_seconds", Entity->RespawnTime},
-			{"custom_data", AiText::Utf8(Entity->m_ini_string.c_str()).c_str()}, {"has_shape", Spawn.m_AttachedObject != nullptr}};
+		AiJson Result = {{"kind", "spawn"}, {"section", AiText::Utf8(Entity->name()).c_str()}, {"respawn_seconds", Entity->RespawnTime},
+			{"custom_data", AiText::Utf8(Entity->m_ini_string.c_str()).c_str()}, {"has_shape", Spawn.m_AttachedObject != nullptr},
+			{"accepts_shape", Entity->shape() != nullptr}};
+		if (auto* Shape = smart_cast<CEditShape*>(Spawn.m_AttachedObject))
+		{
+			Result["shape"] = ShapeDetails(*Shape, "shape");
+			Result["shape"]["name"] = AiText::Utf8(Shape->GetName()).c_str();
+		}
+		return Result;
 	}
 	if (Spawn.m_Type == ptRPoint)
 	{
@@ -303,6 +503,70 @@ public:
 		if (Write)
 		{
 			Sound.OnChangeSource(nullptr);
+		}
+		return true;
+	}
+
+	static AiJson SoundEnvironmentDetails(ESoundEnvironment& Environment)
+	{
+		AiJson Result = AiLevelEntity::ShapeDetails(Environment, "sound_environment");
+		Result["inner_environment"] = AiText::Utf8(Environment.m_EnvInner.c_str()).c_str();
+		Result["outer_environment"] = AiText::Utf8(Environment.m_EnvOuter.c_str()).c_str();
+		return Result;
+	}
+
+	static bool SetSoundEnvironment(ESoundEnvironment& Environment, const AiJson& Changes, bool Write)
+	{
+		using namespace AiLevelEntity;
+		xr_string Inner, Outer;
+		if (!OnlyKeys(Changes, {"size_m", "inner_environment", "outer_environment"}) ||
+			(Changes.contains("inner_environment") && !SoundEnvironmentName(Changes, "inner_environment", Inner)) ||
+			(Changes.contains("outer_environment") && !SoundEnvironmentName(Changes, "outer_environment", Outer)) ||
+			(Changes.contains("size_m") && !SetShape(Environment, {{"size_m", Changes["size_m"]}}, Write)))
+		{
+			return false;
+		}
+		if (Write)
+		{
+			if (Changes.contains("inner_environment"))
+			{
+				Environment.m_EnvInner = Inner.c_str();
+			}
+			if (Changes.contains("outer_environment"))
+			{
+				Environment.m_EnvOuter = Outer.c_str();
+			}
+			Environment.OnChangeEnvs(nullptr);
+		}
+		return true;
+	}
+
+	static AiJson ParticleDetails(EParticlesObject& Particle)
+	{
+		const IParticleCustom* Visual = Particle.GetParticles();
+		return {{"kind", "particle"}, {"particle", AiText::Utf8(Particle.m_RefName.c_str()).c_str()},
+			{"game_type_flags", Particle.m_GameType.m_GameType.get()}, {"compiled", Visual != nullptr}};
+	}
+
+	static bool SetParticle(EParticlesObject& Particle, const AiJson& Changes, bool Write)
+	{
+		using namespace AiLevelEntity;
+		xr_string Effect;
+		u32 Flags = Particle.m_GameType.m_GameType.get();
+		if (!OnlyKeys(Changes, {"particle", "game_type_flags"}) ||
+			(Changes.contains("particle") && !ParticleResource(Changes, "particle", Effect)) ||
+			(Changes.contains("game_type_flags") && !Unsigned(Changes, "game_type_flags", 0, 65535, Flags)))
+		{
+			return false;
+		}
+		if (Write)
+		{
+			if (!Effect.empty() && (!Particle.GetParticles() || !Particle.m_RefName.c_str() || Effect != Particle.m_RefName.c_str()) &&
+				!Particle.Compile(Effect.c_str()))
+			{
+				return false;
+			}
+			Particle.m_GameType.m_GameType.assign(u16(Flags));
 		}
 		return true;
 	}
@@ -438,11 +702,58 @@ AiSceneExecutor::Json AiSceneExecutor::DispatchLevelEntity(const xr_string& Meth
 		const size_t Next = std::min(Offset, Count) + Sections.size();
 		return {{"ok", true}, {"sections", Sections}, {"next_offset", Next}, {"has_more", Next < Count}, {"total", Count}};
 	}
+	if (Method == "scene.entity_get" && Params.contains("resource_kind"))
+	{
+		size_t Offset, Limit;
+		const xr_string Kind = AiString(Params, "resource_kind");
+		if (Params.contains("object_id") || Params.contains("detail_tool") || Params.contains("detail_model") ||
+			Params.contains("samples") || !AiPage(Params, Offset, Limit) ||
+			(Params.contains("query") && !AiHasString(Params, "query", 128)))
+		{
+			return Error("INVALID_PARAMS", "Query one resource catalog at a time");
+		}
+		const xr_string Query = AiString(Params, "query");
+		Json Items = Json::array();
+		size_t Count = 0;
+		auto Add = [&](const char* Name, const char* Type)
+		{
+			if (Name && AiContains(Name, Query) && Count++ >= Offset && Items.size() < Limit)
+			{
+				Items.push_back({{"name", AiText::Utf8(Name).c_str()}, {"type", Type}});
+			}
+		};
+		if (Kind == "particles")
+		{
+			for (const PS::CPEDef* Effect : RImplementation.PSLibrary.VecPEDs())
+			{
+				Add(Effect->Name(), "effect");
+			}
+			for (const PS::CPGDef* Group : RImplementation.PSLibrary.VecPGDs())
+			{
+				Add(Group->m_Name.c_str(), "group");
+			}
+		}
+		else if (Kind == "sound_environments" && SndLib)
+		{
+			AStringVec Entries;
+			SndLib->GetSoundEnvs(Entries);
+			for (const xr_string& Entry : Entries)
+			{
+				Add(Entry.c_str(), "sound_environment");
+			}
+		}
+		else
+		{
+			return Error("RESOURCE_CATALOG_UNAVAILABLE", "Choose particles or sound_environments");
+		}
+		const size_t Next = std::min(Offset, Count) + Items.size();
+		return {{"ok", true}, {"kind", Kind.c_str()}, {"items", Items}, {"next_offset", Next}, {"has_more", Next < Count}, {"total", Count}};
+	}
 	if (Method == "scene.entity_create")
 	{
 		const xr_string Kind = AiString(Params, "kind");
 		ObjClassID Class = OBJCLASS_DUMMY;
-		xr_string Section, Source;
+		xr_string Section, Source, Particle;
 		u32 Width = 129, Height = 129;
 		float Fill = 0.5f;
 		if (Kind == "light")
@@ -463,14 +774,46 @@ AiSceneExecutor::Json AiSceneExecutor::DispatchLevelEntity(const xr_string& Meth
 		{
 			Class = OBJCLASS_TERRAIN;
 		}
+		else if (Kind == "particle" && ParticleResource(Params, "particle", Particle))
+		{
+			Class = OBJCLASS_PS;
+		}
+		else if (Kind == "shape")
+		{
+			Class = OBJCLASS_SHAPE;
+		}
+		else if (Kind == "puddle")
+		{
+			Class = OBJCLASS_PUDDLES;
+		}
+		else if (Kind == "planar")
+		{
+			Class = OBJCLASS_PLANARS;
+		}
+		else if (Kind == "sound_environment")
+		{
+			Class = OBJCLASS_SOUND_ENV;
+		}
+		else if (Kind == "fog_volume")
+		{
+			Class = OBJCLASS_FOG_VOL;
+		}
 		if (Class == OBJCLASS_DUMMY)
 		{
-			return Error("INVALID_ENTITY", "Choose light, an installed spawn section or sound, or a valid terrain grid");
+			return Error("INVALID_ENTITY", "Choose a supported entity kind with valid creation parameters and installed resources");
 		}
-		Fvector Position;
-		if (!AiVector(Params, "position_m", Position, 0, 1000000))
+		const bool Volume = Class == OBJCLASS_SHAPE || Class == OBJCLASS_PUDDLES || Class == OBJCLASS_PLANARS ||
+			Class == OBJCLASS_SOUND_ENV || Class == OBJCLASS_FOG_VOL;
+		const xr_string Primitive = AiString(Params, "shape_type", "box");
+		const bool Sphere = Class == OBJCLASS_SHAPE && Primitive == "sphere";
+		Fvector Position, Rotation, Size;
+		float Radius = 1;
+		if (!AiVector(Params, "position_m", Position, 0, 1000000) || !AiVector(Params, "rotation_degrees", Rotation, 0, 360000) ||
+			(Params.contains("shape_type") && (Class != OBJCLASS_SHAPE || (Primitive != "box" && !Sphere))) ||
+			(Params.contains("radius_m") && (!Sphere || !ApplyNumbers(Params, {{"radius_m", &Radius, 0.001f, 100000}}, true))) ||
+			(Params.contains("size_m") && (!Volume || Sphere || !BoxSize(Params, Size))))
 		{
-			return Error("INVALID_TRANSFORM", "Supply a finite position in metres");
+			return Error("INVALID_TRANSFORM", "Supply valid position, rotation, box dimensions or sphere radius");
 		}
 		string256 Name;
 		if (Params.contains("name"))
@@ -501,6 +844,34 @@ AiSceneExecutor::Json AiSceneExecutor::DispatchLevelEntity(const xr_string& Meth
 			return Error("ENTITY_CREATE_FAILED", "SDK could not create this entity");
 		}
 		Object->SetPosition(Position);
+		if (Params.contains("rotation_degrees"))
+		{
+			Object->SetRotation(Rotation.mul(PI / 180.f));
+		}
+		if (Class == OBJCLASS_SHAPE)
+		{
+			auto* Shape = static_cast<CEditShape*>(Object);
+			if (Sphere)
+			{
+				Fsphere Geometry;
+				Geometry.identity();
+				Geometry.R = Radius;
+				Shape->add_sphere(Geometry);
+			}
+			else
+			{
+				Shape->add_box(Fidentity);
+			}
+		}
+		if (Params.contains("size_m"))
+		{
+			Object->NumSetScale(Size);
+		}
+		if (Class == OBJCLASS_PS && !static_cast<EParticlesObject*>(Object)->Compile(Particle.c_str()))
+		{
+			xr_delete(Object);
+			return Error("ENTITY_CREATE_FAILED", "SDK could not compile the particle instance");
+		}
 		if (Class == OBJCLASS_SOUND_SRC)
 		{
 			static_cast<ESoundSource*>(Object)->SetSourceWAV(Source.c_str());
@@ -611,6 +982,26 @@ AiSceneExecutor::Json AiSceneExecutor::DispatchLevelEntity(const xr_string& Meth
 		case OBJCLASS_SOUND_SRC: return AiLevelEntityAccess::SoundDetails(*static_cast<ESoundSource*>(Object));
 		case OBJCLASS_SPAWNPOINT: return SpawnDetails(*static_cast<CSpawnPoint*>(Object));
 		case OBJCLASS_TERRAIN: return AiLevelEntityAccess::TerrainDetails(*static_cast<CTerrain*>(Object), Query);
+		case OBJCLASS_PS: return AiLevelEntityAccess::ParticleDetails(*static_cast<EParticlesObject*>(Object));
+		case OBJCLASS_SHAPE: return ShapeDetails(*static_cast<CEditShape*>(Object), "shape");
+		case OBJCLASS_PUDDLES: return ShapeDetails(*static_cast<CEditShape*>(Object), "puddle");
+		case OBJCLASS_SOUND_ENV: return AiLevelEntityAccess::SoundEnvironmentDetails(*static_cast<ESoundEnvironment*>(Object));
+		case OBJCLASS_PLANARS:
+		{
+			auto& Planar = *static_cast<CPlanar*>(Object);
+			Json Details = ShapeDetails(Planar, "planar");
+			Details["stiffness"] = Planar.m_Stiffness;
+			return Details;
+		}
+		case OBJCLASS_FOG_VOL:
+		{
+			auto& Fog = *static_cast<EFogVolume*>(Object);
+			Json Details = ShapeDetails(Fog, "fog_volume");
+			Details["fog_kind"] = Fog.m_volumeType == fvEmitter ? "emitter" : "occlusion";
+			Details["fog_profile"] = AiText::Utf8(Fog.m_volume_profile.c_str()).c_str();
+			Details["group_id"] = Fog.m_group_id;
+			return Details;
+		}
 		default: return nullptr;
 		}
 	};
@@ -623,6 +1014,61 @@ AiSceneExecutor::Json AiSceneExecutor::DispatchLevelEntity(const xr_string& Meth
 		}
 		return {{"ok", true}, {"object", Describe(Object)}, {"details", Details}};
 	}
+	if (Object->FClassID == OBJCLASS_SPAWNPOINT && (Changes.contains("attach_shape_id") || Changes.contains("detach_shape")))
+	{
+		auto& Spawn = *static_cast<CSpawnPoint*>(Object);
+		ESceneCustomOTool* ShapeTool = Scene->GetOTool(OBJCLASS_SHAPE);
+		if (Changes.size() != 1 || !ShapeTool || !ShapeTool->IsEnabled() || !ShapeTool->IsEditable())
+		{
+			return Error("INVALID_SPAWN_SHAPE_CHANGE", "Use one attachment operation and enable editing in the Shape tool");
+		}
+		CCustomObject* Shape = Spawn.m_AttachedObject;
+		const bool Attach = Changes.contains("attach_shape_id");
+		if (Attach)
+		{
+			CSE_Abstract* Entity = Spawn.m_SpawnData.GetEntity();
+			if (!Entity || !Entity->shape() || Shape)
+			{
+				return Error("INVALID_SPAWN_SHAPE", "The spawn must accept a shape and have no existing attachment");
+			}
+			xr_vector<CCustomObject*> Shapes;
+			if (!Resolve({{"object_id", Changes["attach_shape_id"]}}, Shapes, Failure, true))
+			{
+				return Failure;
+			}
+			Shape = Shapes.front();
+			if (Shape->FClassID != OBJCLASS_SHAPE || Shape->GetOwner() ||
+				static_cast<CEditShape*>(Shape)->m_shape_type == eShapeLevelBound || static_cast<CEditShape*>(Shape)->GetShapes().empty())
+			{
+				return Error("INVALID_SPAWN_SHAPE", "Choose a standalone editable shape with geometry");
+			}
+		}
+		else if (Changes["detach_shape"] != true || !Shape || Scene->FindObjectByName(Shape->GetName(), Shape))
+		{
+			return Error("INVALID_SPAWN_SHAPE", "The attachment must exist and its name must be available in the scene");
+		}
+		AiSceneSnapshot Before;
+		Scene->BeforeObjectChange(Object);
+		if (Attach)
+		{
+			Scene->BeforeObjectChange(Shape);
+			if (!Spawn.AttachObject(Shape))
+			{
+				return Error("SPAWN_SHAPE_ATTACH_FAILED", "The SDK refused the attachment");
+			}
+		}
+		else
+		{
+			Spawn.DetachObject();
+		}
+		Json Result = {{"object", Describe(Object)}, {"details", SpawnDetails(Spawn)}};
+		if (!Attach)
+		{
+			Result["detached"] = Describe(Shape);
+		}
+		FinishChange(Before, Result);
+		return Result;
+	}
 	auto Apply = [&](bool WriteFields)
 	{
 		switch (Object->FClassID)
@@ -631,6 +1077,12 @@ AiSceneExecutor::Json AiSceneExecutor::DispatchLevelEntity(const xr_string& Meth
 		case OBJCLASS_SOUND_SRC: return AiLevelEntityAccess::SetSound(*static_cast<ESoundSource*>(Object), Changes, WriteFields);
 		case OBJCLASS_SPAWNPOINT: return SetSpawn(*static_cast<CSpawnPoint*>(Object), Changes, WriteFields);
 		case OBJCLASS_TERRAIN: return AiLevelEntityAccess::SetTerrain(*static_cast<CTerrain*>(Object), Changes, WriteFields);
+		case OBJCLASS_PS: return AiLevelEntityAccess::SetParticle(*static_cast<EParticlesObject*>(Object), Changes, WriteFields);
+		case OBJCLASS_SHAPE:
+		case OBJCLASS_PUDDLES: return SetShape(*static_cast<CEditShape*>(Object), Changes, WriteFields);
+		case OBJCLASS_SOUND_ENV: return AiLevelEntityAccess::SetSoundEnvironment(*static_cast<ESoundEnvironment*>(Object), Changes, WriteFields);
+		case OBJCLASS_PLANARS: return SetPlanar(*static_cast<CPlanar*>(Object), Changes, WriteFields);
+		case OBJCLASS_FOG_VOL: return SetFog(*static_cast<EFogVolume*>(Object), Changes, WriteFields);
 		default: return false;
 		}
 	};

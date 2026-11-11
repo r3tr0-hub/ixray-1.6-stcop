@@ -23,6 +23,10 @@ void ESceneSectorTool::_OnObjectRemove(CSceneObject* obj)
     if (obj && !m_Objects.empty())
     {
         EditMeshVec* meshes 		= obj->Meshes();
+		if (meshes == nullptr)
+		{
+			return;
+		}
         for (EditMeshIt m_it= meshes->begin(); m_it!=meshes->end(); ++m_it)
         {
             for(ObjectIt _F=m_Objects.begin();_F!=m_Objects.end();++_F)
@@ -72,6 +76,10 @@ void ESceneSectorTool::OnBeforeObjectChange(CCustomObject* O)
     CSceneObject* obj = smart_cast<CSceneObject*>(O);
     if (obj&&!m_Objects.empty()){
 	    EditMeshVec* meshes = obj->Meshes();
+		if (meshes == nullptr)
+		{
+			return;
+		}
         for (EditMeshIt m_it= meshes->begin(); m_it!=meshes->end(); m_it++){
 	        for(ObjectIt _F=m_Objects.begin();_F!=m_Objects.end();_F++){
     	        CSector* sector = smart_cast<CSector*>(*_F); VERIFY(sector);

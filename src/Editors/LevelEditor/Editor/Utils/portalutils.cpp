@@ -454,9 +454,10 @@ public:
 			portals.push_back	(current);
 		}
 	}
-	void export_portals()
+	int export_portals(bool AllowAbort)
 	{
 		Tools->ClearDebugDraw();
+		int Created = 0;
 		int PortalsCount = portals.size();
 		int curr = 0;
 
@@ -464,6 +465,11 @@ public:
 
 		for (sCollector::sPortal& Portal : portals)
 		{
+			if (AllowAbort && EContext.UI->NeedAbort())
+			{
+				EContext.UI->ProgressEnd(pb);
+				return -2;
+			}
 			if (Portal.e.size() > 1)
 			{
 				Msg("portal %d of %d", curr++, PortalsCount);
@@ -478,6 +484,12 @@ public:
 				}
 				IntIt end = std::unique(vlist.begin(), vlist.end());
 				vlist.erase(end, vlist.end());
+				const xr_hash_set<int> UniqueVertices(vlist.begin(), vlist.end());
+				if (UniqueVertices.size() < 3)
+				{
+					pb->Inc();
+					continue;
+				}
 
 				// append portal
 				string256 namebuffer;
@@ -494,6 +506,7 @@ public:
 				if (_O->Valid()) 
 				{
 					Scene->AppendObject(_O, false);
+					++Created;
 				}
 				else 
 				{
@@ -517,15 +530,25 @@ public:
 		}
 
 		EContext.UI->ProgressEnd(pb);
+		return Created;
 	}
 };
 
-int CPortalUtils::CalculateSelectedPortals(ObjectList& sectors)
+int CPortalUtils::CalculateSelectedPortals(ObjectList& sectors, bool SaveUndo, const Fbox* Bounds)
 {
-	// calculate portals
-	Fbox bb;
-	Scene->GetBox(bb, OBJCLASS_SCENEOBJECT);
-	sCollector* CL = new sCollector(bb);
+	Fbox Box;
+	if (Bounds != nullptr)
+	{
+		Box = *Bounds;
+	}
+	else if (!Scene->GetBox(Box, OBJCLASS_SCENEOBJECT))
+	{
+		return 0;
+	}
+	// Keep flat geometry inside the weld grid and allow its neighbor search at the edges.
+	Box.min.sub(EPS_L * 2);
+	Box.max.add(EPS_L * 2);
+	xr_unique_ptr<sCollector> CL(new sCollector(Box));
 	Fmatrix T;
 
 	// 1. xform + weld
@@ -566,14 +589,60 @@ int CPortalUtils::CalculateSelectedPortals(ObjectList& sectors)
 	CL->make_portals();
 	// 6. export portals
 	EContext.UI->SetStatus("building portals...");
-	CL->export_portals();
+	const int Created = CL->export_portals(!SaveUndo);
+	if (SaveUndo)
+	{
+		Scene->UndoSave();
+	}
+	return Created;
+}
 
-	Scene->UndoSave();
+int CPortalUtils::CalculatePortalPair(CSector* Front, CSector* Back)
+{
+	if (Front == nullptr || Back == nullptr || Front == Back)
+	{
+		return -1;
+	}
 
-	int iRes = CL->portals.size();
-	xr_delete(CL);
-
-	return iRes;
+	Fbox Bounds;
+	Bounds.invalidate();
+	for (CSector* Sector : {Front, Back})
+	{
+		bool HasGeometry = false;
+		for (const CSectorItem& Item : Sector->sector_items)
+		{
+			if (Item.object == nullptr || Item.mesh == nullptr)
+			{
+				return -1;
+			}
+			const auto* Meshes = Item.object->Meshes();
+			if (Meshes == nullptr || std::find(Meshes->begin(), Meshes->end(), Item.mesh) == Meshes->end())
+			{
+				return -1;
+			}
+			if (Item.object->IsMUStatic() || Item.mesh->m_Faces.empty())
+			{
+				continue;
+			}
+			Fbox MeshBox;
+			Item.mesh->GetBox(MeshBox);
+			MeshBox.xform(Item.object->_Transform());
+			if (!MeshBox.is_valid() || !_valid(MeshBox.min) || !_valid(MeshBox.max))
+			{
+				return -1;
+			}
+			Bounds.merge(MeshBox);
+			HasGeometry = true;
+		}
+		if (!HasGeometry)
+		{
+			return -1;
+		}
+	}
+	ObjectList Sectors = {Front, Back};
+	const int Created = CalculateSelectedPortals(Sectors, false, &Bounds);
+	EContext.UI->ResetStatus();
+	return Created;
 }
 
 int CPortalUtils::CalculateAllPortals()

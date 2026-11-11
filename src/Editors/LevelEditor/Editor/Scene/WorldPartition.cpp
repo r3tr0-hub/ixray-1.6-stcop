@@ -1,5 +1,7 @@
 #include "stdafx.h"
 
+static constexpr float DefaultWorldPartitionCellSize = 100.0f;
+
 CWorldPartition GWorldPartition;
 
 static Fvector StreamCameraPosition()
@@ -67,7 +69,7 @@ bool CWorldPartition::IsPointDisabled(const Fvector& Position) const
 
 CWorldPartition::CWorldPartition()
 {
-	CellSize = 100.0f;
+	CellSize = DefaultWorldPartitionCellSize;
 	Bounds.invalidate();
 	Dirty = true;
 	LastObjectCount = -1;
@@ -403,6 +405,7 @@ void CWorldPartition::LoadLevelState(const char* PartPath)
 {
 	DisabledCells.clear();
 	Dirty = true;
+	CellSize = DefaultWorldPartitionCellSize;
 
 	const xr_string FileName = LevelStateFile(PartPath);
 	if (!FS.exist(FileName.c_str()))
@@ -413,15 +416,19 @@ void CWorldPartition::LoadLevelState(const char* PartPath)
 	CInifile Ini(FileName.c_str());
 	if (Ini.line_exist("world_partition", "cell_size"))
 	{
-		CellSize = std::max(Ini.r_float("world_partition", "cell_size"), 8.0f);
+		const float SavedSize = Ini.r_float("world_partition", "cell_size");
+		if (std::isfinite(SavedSize))
+		{
+			CellSize = std::max(SavedSize, 8.0f);
+		}
 	}
 
-	if (!Ini.section_exist("disabled_cells"))
+	if (!Ini.line_exist("disabled_cells", "count"))
 	{
 		return;
 	}
 
-	const u32 Count = Ini.r_u32("disabled_cells", "count");
+	const u32 Count = std::min(Ini.r_u32("disabled_cells", "count"), Ini.line_count("disabled_cells"));
 	for (u32 i = 0; i < Count; i++)
 	{
 		string32 Key;

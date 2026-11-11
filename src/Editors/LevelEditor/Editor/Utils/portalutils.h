@@ -28,10 +28,11 @@ using SVertexIt = SVertexVec::iterator;
 
 class CPortalUtils{
 //	void FindSVertexLinks(int id, CSector* S, SVertexVec& V);
-	int  CalculateSelectedPortals(ObjectList& sectors);
+	int  CalculateSelectedPortals(ObjectList& sectors, bool SaveUndo = true, const Fbox* Bounds = nullptr);
 public:
 	bool CalculateConvexHull(FvectorVec& points);
 	int  CalculatePortals(CSector* SF, CSector* SB);
+	int  CalculatePortalPair(CSector* Front, CSector* Back);
 	int  CalculateSelectedPortals();
 	int  CalculateAllPortals();
 //.	int  CalculateAllPortals2();

@@ -168,6 +168,7 @@ CUIMacroView::CUIMacroView()
 	if (!LoadFile())
 	{
 		Read(nlohmann::json::object());
+		SavedState = Write().dump().c_str();
 	}
 }
 

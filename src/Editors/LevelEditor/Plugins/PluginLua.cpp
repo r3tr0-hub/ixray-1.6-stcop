@@ -32,19 +32,26 @@ bool CPluginLua::RunChecked(const xr_map<xr_string, xr_string>& Arguments)
 	}
 
 	const int Base = lua_gettop(State);
+	lua_getglobal(State, "main");
+	const auto RestoreEntry = [State, Base]
+	{
+		lua_pushvalue(State, Base + 1);
+		lua_setglobal(State, "main");
+		lua_settop(State, Base);
+	};
 	lua_pushnil(State);
 	lua_setglobal(State, "main");
 	if (luaL_dofile(State, Path.c_str()) != 0)
 	{
 		Msg("! Error loading plugin %s: %s", Name.c_str(), lua_tostring(State, -1));
-		lua_settop(State, Base);
+		RestoreEntry();
 		return false;
 	}
 	lua_getglobal(State, "main");
 	if (!lua_isfunction(State, -1))
 	{
 		Msg("! Missing plugin entry function main in %s", Name.c_str());
-		lua_settop(State, Base);
+		RestoreEntry();
 		return false;
 	}
 
@@ -70,7 +77,7 @@ bool CPluginLua::RunChecked(const xr_map<xr_string, xr_string>& Arguments)
 	{
 		Msg("! Plugin %s failed: %s", Name.c_str(), lua_tostring(State, -1));
 	}
-	lua_settop(State, Base);
+	RestoreEntry();
 	return Success;
 }
 

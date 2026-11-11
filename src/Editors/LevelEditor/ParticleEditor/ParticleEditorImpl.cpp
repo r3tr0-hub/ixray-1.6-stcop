@@ -39,6 +39,7 @@ void PS::CPEDef::Copy(const CPEDef& src)
     m_MaxParticles		= src.m_MaxParticles;
 	m_CachedShader		= src.m_CachedShader;
     m_VelocityScale.set			(src.m_VelocityScale);
+    m_APDefaultRotation.set(src.m_APDefaultRotation);
 	m_fCollideOneMinusFriction	= src.m_fCollideOneMinusFriction;
     m_fCollideResilience		= src.m_fCollideResilience;
     m_fCollideSqrCutoff			= src.m_fCollideSqrCutoff; 

@@ -21,11 +21,6 @@ static xr_string AiString(const nlohmann::json& Value, const char* Key, const ch
 	return Iter->get_ref<const nlohmann::json::string_t&>().c_str();
 }
 
-static bool AiChangesEditor(const xr_string& Method)
-{
-	return Method == "scene.select" || Method == "scene.focus" || Method == "scene.transform" || Method == "scene.duplicate" || Method == "scene.place" || Method == "scene.undo" || Method == "scene.redo" || Method == "scene.material_set" || Method == "scene.save_copy";
-}
-
 static void AiRemovePrivateData(nlohmann::json& Data)
 {
 	if (Data.is_object())
@@ -350,7 +345,7 @@ void UIAiAssistant::Update()
 		const nlohmann::json Params = Data.contains("params") && Data["params"].is_object() ? Data["params"] : nlohmann::json::object();
 		nlohmann::json Result;
 		const bool IsCancelled = CancelledRequests.erase(Id) != 0;
-		if ((IsRejectingCommands && AiChangesEditor(Method)) || !Process.IsRunning() || IsCancelled)
+		if ((IsRejectingCommands && AiSceneExecutor::IsMutation(Method)) || !Process.IsRunning() || IsCancelled)
 		{
 			Result = Executor.CancelOperation(Method, Params);
 		}

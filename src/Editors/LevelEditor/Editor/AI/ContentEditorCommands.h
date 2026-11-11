@@ -168,7 +168,7 @@ inline Json ParticleEffect(const PS::CPEDef& Effect, size_t Offset, size_t Limit
 			Items.push_back({{"action_index", Index}, {"invalid", true}});
 		}
 	}
-	Json Result = {{"ok", true}, {"name", Text(Effect.Name())}, {"max_particles", Effect.m_MaxParticles}, {"texture", Text(Effect.m_TextureName.c_str())}, {"shader", Text(Effect.m_ShaderName.c_str())}, {"actions", Items}};
+	Json Result = {{"ok", true}, {"name", Text(Effect.Name())}, {"max_particles", Effect.m_MaxParticles}, {"time_limit_seconds", Effect.m_Flags.is(PS::CPEDef::dfTimeLimit) ? Effect.m_fTimeLimit : 0.f}, {"texture", Text(Effect.m_TextureName.c_str())}, {"shader", Text(Effect.m_ShaderName.c_str())}, {"actions", Items}};
 	SetPage(Result, Offset, Items.size(), Effect.m_EActionList.size());
 	return Result;
 }
@@ -197,7 +197,12 @@ inline Json ReadParticles(CParticleTool& Tool, const Json& Params)
 	{
 		Items.push_back(Text(Effects[Index]->Name()));
 	}
-	Json Result = {{"ok", true}, {"items", Items}, {"modified", Tool.IsModified()}, {"playing", Tool.IsPlaying()}};
+	Json Types = Json::array();
+	for (const auto* Token = actions_token; Token && Token->name; ++Token)
+	{
+		Types.push_back(Text(Token->name));
+	}
+	Json Result = {{"ok", true}, {"items", Items}, {"modified", Tool.IsModified()}, {"playing", Tool.IsPlaying()}, {"action_types", Types}};
 	SetPage(Result, Offset, Items.size(), Effects.size());
 	return Result;
 }
@@ -365,6 +370,150 @@ inline Json SaveParticle(PS::CPEDef& Effect)
 	return Result;
 }
 
+inline Json CreateParticle(CParticleTool& Tool, const Json& Params, const xr_string& Name, bool Clone)
+{
+	if (std::filesystem::u8path(Name.c_str()).extension() == ".pe")
+	{
+		return Error("INVALID_PARTICLE_NAME", "Use a library name without the .pe extension");
+	}
+	string_path FileName;
+	if (Tool.FindPE(Name.c_str()) || Tool.FindPG(Name.c_str()) || Tool.FindPAC(Name.c_str()) ||
+		(FS.path_exist("$game_particles$") && FS.exist(FileName, "$game_particles$", Name.c_str(), ".pe")))
+	{
+		return Error("PARTICLE_ALREADY_EXISTS", "Choose a new library name for the effect");
+	}
+	PS::CPEDef* Source = nullptr;
+	if (Clone)
+	{
+		xr_string SourceName;
+		if (!ResourceName(Params, "source_name", SourceName, 200) || !(Source = Tool.FindPE(SourceName.c_str())))
+		{
+			return Error("PARTICLE_NOT_FOUND", "Provide source_name from scene_particle_read");
+		}
+		if (std::any_of(Source->m_EActionList.begin(), Source->m_EActionList.end(), [](const EParticleAction* Action)
+		{
+			return Action == nullptr;
+		}))
+		{
+			return Error("INVALID_PARTICLE_SOURCE", "The source contains an invalid action");
+		}
+	}
+	PS::CPEDef* Effect = Tool.CreateEffectForEditing(Name.c_str(), Source);
+	Json Result = ParticleEffect(*Effect, 0, 30);
+	Result["saved"] = false;
+	return Result;
+}
+
+inline Json EditParticleActions(CParticleTool& Tool, PS::CPEDef& Effect, const Json& Params, bool Add)
+{
+	if (Add)
+	{
+		const xr_string Type = String(Params, "action_type");
+		const auto* Token = actions_token;
+		while (Token && Token->name && Type != Token->name)
+		{
+			++Token;
+		}
+		xr_unique_ptr<EParticleAction> Action(Token && Token->name && pCreateEAction ? pCreateEAction(PAPI::PActionEnum(Token->id)) : nullptr);
+		if (!Action)
+		{
+			return Error("INVALID_PARTICLE_ACTION_TYPE", "Use an action type from scene_particle_read");
+		}
+		if (Effect.m_EActionList.size() >= 256)
+		{
+			return Error("PARTICLE_ACTION_LIMIT", "This effect already has 256 actions");
+		}
+		xr_string Prefix = Action->actionName.c_str();
+		xr_strlwr(Prefix);
+		xr_string Unique = Prefix;
+		for (u32 Suffix = 1;; ++Suffix)
+		{
+			bool Exists = false;
+			Effect.FindActionByName(Unique.c_str(), Exists);
+			if (!Exists)
+			{
+				break;
+			}
+			Unique = Prefix + "_" + xr_string::ToString(Suffix);
+		}
+		Action->actionName = Unique.c_str();
+		Action->parent = &Effect;
+		Tool.SelectEffectForEditing(Effect);
+		Effect.m_EActionList.push_back(Action.get());
+		EParticleAction* Added = Action.release();
+		Tool.CommitEffectEdit();
+		return {{"ok", true}, {"name", Text(Effect.Name())}, {"saved", false}, {"effect_action", ParticleAction(*Added, Effect.m_EActionList.size() - 1)}};
+	}
+	const Json IndexValue = Params.value("action_index", Json());
+	if (!Integer(IndexValue, 0, 100000000) || IndexValue.get<size_t>() >= Effect.m_EActionList.size())
+	{
+		return Error("INVALID_ACTION_INDEX", "Use an action_index from scene_particle_read");
+	}
+	const size_t Index = IndexValue.get<size_t>();
+	const EParticleAction* Action = Effect.m_EActionList[Index];
+	if (Action && Action->type == PAPI::PAKillOldID && Action->flags.is(EParticleAction::flEnabled))
+	{
+		const bool HasOtherKill = std::any_of(Effect.m_EActionList.begin(), Effect.m_EActionList.end(), [&](const EParticleAction* Other)
+		{
+			return Other && Other != Action && Other->type == PAPI::PAKillOldID && Other->flags.is(EParticleAction::flEnabled);
+		});
+		if (!HasOtherKill)
+		{
+			return Error("REQUIRED_PARTICLE_ACTION", "Keep at least one enabled KillOld action");
+		}
+	}
+	Tool.SelectEffectForEditing(Effect);
+	Tool.RemoveAction(u32(Index), true);
+	Tool.CommitEffectEdit();
+	return {{"ok", true}, {"name", Text(Effect.Name())}, {"saved", false}, {"removed_action_index", Index}, {"total", Effect.m_EActionList.size()}};
+}
+
+inline Json PatchParticleEffect(CParticleTool& Tool, PS::CPEDef& Effect, const Json& Params)
+{
+	const bool ChangeLimit = Params.contains("max_particles");
+	const bool ChangeTime = Params.contains("time_limit_seconds");
+	const bool ChangeSprite = Params.contains("texture") || Params.contains("render_shader");
+	xr_string Texture = Effect.m_TextureName.c_str() ? Effect.m_TextureName.c_str() : "";
+	xr_string Shader = Effect.m_ShaderName.c_str() ? Effect.m_ShaderName.c_str() : "";
+	if ((!ChangeLimit && !ChangeTime && !ChangeSprite) ||
+		(ChangeLimit && !Integer(Params["max_particles"], 1, 100000)) ||
+		(ChangeTime && !Number(Params["time_limit_seconds"], 0, 3600)))
+	{
+		return Error("INVALID_PARTICLE_EFFECT_PATCH", "Specify a valid particle count, time limit, or sprite resources");
+	}
+	if (ChangeSprite)
+	{
+		if ((Params.contains("texture") && !ResourceName(Params, "texture", Texture, 255)) ||
+			(Params.contains("render_shader") && !ResourceName(Params, "render_shader", Shader, 127)) ||
+			(Texture != "$null" && Texture.find('$') != xr_string::npos) ||
+			!AiMaterials::TextureExists(Texture.c_str()) || Shader.empty() || !DEV->_FindBlender(Shader.c_str()))
+		{
+			return Error("INVALID_PARTICLE_SPRITE", "Provide a valid SDK sprite texture and render shader");
+		}
+	}
+	Tool.SelectEffectForEditing(Effect);
+	if (ChangeLimit)
+	{
+		Effect.m_MaxParticles = Params["max_particles"].get<int>();
+	}
+	if (ChangeTime)
+	{
+		Effect.m_fTimeLimit = Params["time_limit_seconds"].get<float>();
+		Effect.m_Flags.set(PS::CPEDef::dfTimeLimit, Effect.m_fTimeLimit > 0.f);
+	}
+	if (ChangeSprite)
+	{
+		Effect.m_Flags.set(PS::CPEDef::dfSprite, true);
+		Effect.m_TextureName = Texture.c_str();
+		Effect.m_ShaderName = Shader.c_str();
+		Effect.OnShaderChange(nullptr);
+	}
+	Tool.CommitEffectEdit();
+	Json Result = ParticleEffect(Effect, 0, 30);
+	Result["saved"] = false;
+	return Result;
+}
+
 inline Json EditParticles(CParticleTool& Tool, const Json& Params)
 {
 	const xr_string Operation = String(Params, "action");
@@ -378,19 +527,27 @@ inline Json EditParticles(CParticleTool& Tool, const Json& Params)
 		Tool.StopCurrent(false);
 		return {{"ok", true}, {"playing", Tool.IsPlaying()}};
 	}
-	if (Operation != "set" && Operation != "save" && Operation != "play")
-	{
-		return Error("UNKNOWN_PARTICLE_ACTION", "Use set, save, play, stop, undo or redo");
-	}
 	xr_string Name;
 	if (!ResourceName(Params, "name", Name, 200))
 	{
 		return Error("INVALID_PARTICLE_NAME", "Specify the effect name from Particle Editor");
 	}
+	if (Operation == "create" || Operation == "clone")
+	{
+		return CreateParticle(Tool, Params, Name, Operation == "clone");
+	}
 	PS::CPEDef* Effect = Tool.FindPE(Name.c_str());
 	if (!Effect)
 	{
 		return Error("PARTICLE_NOT_FOUND", "The particle effect does not exist");
+	}
+	if (Operation == "add_action" || Operation == "remove_action")
+	{
+		return EditParticleActions(Tool, *Effect, Params, Operation == "add_action");
+	}
+	if (Operation == "set_effect")
+	{
+		return PatchParticleEffect(Tool, *Effect, Params);
 	}
 	if (Operation == "set")
 	{
@@ -399,6 +556,10 @@ inline Json EditParticles(CParticleTool& Tool, const Json& Params)
 	if (Operation == "save")
 	{
 		return SaveParticle(*Effect);
+	}
+	if (Operation != "play")
+	{
+		return Error("UNKNOWN_PARTICLE_ACTION", "Use a registered Particle Editor action");
 	}
 	Tool.SelectEffectForEditing(*Effect);
 	Tool.PlayCurrent();
@@ -411,6 +572,23 @@ inline Json Surface(const CSurface& Value, size_t Index)
 	return {{"surface_index", Index}, {"name", Text(Value._Name())}, {"texture", Text(Value._Texture())},
 		{"render_shader", Text(Value._ShaderName())}, {"compiler_shader", Text(Value._ShaderXRLCName())},
 		{"game_material", Text(Value._GameMtlName())}, {"shared", Value.UseShared}};
+}
+
+inline Json ActorBone(CBone& Bone, size_t Index)
+{
+	const Fvector Rotation = {rad2deg(Bone.rest_rotate.x), rad2deg(Bone.rest_rotate.y), rad2deg(Bone.rest_rotate.z)};
+	return {{"bone_index", Index}, {"name", Text(Bone.name.c_str())}, {"parent", Text(Bone.parent_name.c_str())},
+		{"weight_map", Text(Bone.wmap.c_str())}, {"mass", Bone.mass}, {"center_of_mass_m", Vector(Bone.center_of_mass)},
+		{"bind_position_m", Vector(Bone.rest_offset)}, {"bind_rotation_degrees", Vector(Rotation)},
+		{"game_material", Text(Bone.game_mtl.c_str())}, {"shape_type", Bone.shape.type}};
+}
+
+inline Json ActorMotion(CSMotion& Motion, size_t Index)
+{
+	return {{"motion_index", Index}, {"name", Text(Motion.Name())}, {"frame_start", Motion.FrameStart()},
+		{"frame_end", Motion.FrameEnd()}, {"fps", Motion.FPS()}, {"speed", Motion.fSpeed}, {"accrue", Motion.fAccrue},
+		{"falloff", Motion.fFalloff}, {"power", Motion.fPower}, {"is_fx", Motion.m_Flags.is(esmFX)},
+		{"stop_at_end", Motion.m_Flags.is(esmStopAtEnd)}, {"no_mix", Motion.m_Flags.is(esmNoMix)}, {"sync_part", Motion.m_Flags.is(esmSyncPart)}};
 }
 
 inline Json ReadActor(CActorTools& Tool, const Json& Params)
@@ -450,7 +628,7 @@ inline Json ReadActor(CActorTools& Tool, const Json& Params)
 		Total = Object->m_Bones.size();
 		for (size_t Index = Offset; Index < Total && Items.size() < Limit; ++Index)
 		{
-			Items.push_back({{"bone_index", Index}, {"name", Text(Object->BoneNameByID(int(Index)).c_str())}});
+			Items.push_back(ActorBone(*Object->m_Bones[Index], Index));
 		}
 	}
 	else if (Section == "motions")
@@ -458,7 +636,7 @@ inline Json ReadActor(CActorTools& Tool, const Json& Params)
 		Total = Object->m_SMotions.size();
 		for (size_t Index = Offset; Index < Total && Items.size() < Limit; ++Index)
 		{
-			Items.push_back({{"motion_index", Index}, {"name", Text(Object->m_SMotions[Index]->Name())}});
+			Items.push_back(ActorMotion(*Object->m_SMotions[Index], Index));
 		}
 	}
 	else
@@ -539,6 +717,153 @@ inline Json PatchActorSurface(CActorTools& Tool, CEditableObject& Object, const 
 	return {{"ok", true}, {"saved", false}, {"surface", Surface(*Entry, Index)}};
 }
 
+inline bool ReadVector(const Json& Data, Fvector& Value, float Min, float Max)
+{
+	if (!Data.is_array() || Data.size() != 3 || !std::all_of(Data.begin(), Data.end(), [&](const Json& Component)
+	{
+		return Number(Component, Min, Max);
+	}))
+	{
+		return false;
+	}
+	Value.set(Data[0].get<float>(), Data[1].get<float>(), Data[2].get<float>());
+	return true;
+}
+
+inline Json PatchActorBone(CActorTools& Tool, CEditableObject& Object, const Json& Params)
+{
+	const Json IndexValue = Params.value("bone_index", Json());
+	const Json Fields = Params.value("fields", Json::object());
+	if (Tool.ReadOnly() || !Integer(IndexValue, 0, 100000000) || IndexValue.get<size_t>() >= Object.m_Bones.size() ||
+		!Fields.is_object() || (Fields.empty() && !Params.contains("game_material")))
+	{
+		return Error("INVALID_ACTOR_BONE", "Specify a writable bone and a field from scene_actor_read");
+	}
+	const size_t Index = IndexValue.get<size_t>();
+	CBone& Bone = *Object.m_Bones[Index];
+	float Mass = Bone.mass;
+	Fvector Center = Bone.center_of_mass;
+	Fvector Position = Bone.rest_offset;
+	Fvector Rotation = Bone.rest_rotate;
+	xr_string Material;
+	for (auto It = Fields.begin(); It != Fields.end(); ++It)
+	{
+		const auto& Key = It.key();
+		if (Key == "mass" && Number(*It, 0, 10000))
+		{
+			Mass = It->get<float>();
+			continue;
+		}
+		if ((Key == "center_of_mass_m" && ReadVector(*It, Center, -10000, 10000)) ||
+			(Key == "bind_position_m" && ReadVector(*It, Position, -10000, 10000)))
+		{
+			continue;
+		}
+		if (Key == "bind_rotation_degrees" && ReadVector(*It, Rotation, -360, 360))
+		{
+			Rotation.set(deg2rad(Rotation.x), deg2rad(Rotation.y), deg2rad(Rotation.z));
+			continue;
+		}
+		Json Result = Error("INVALID_ACTOR_BONE_FIELD", "The bone does not support this field or value");
+		Result["field"] = Key;
+		return Result;
+	}
+	if (Params.contains("game_material") &&
+		(!ResourceName(Params, "game_material", Material, 127) || !GameMaterialLibraryEditors ||
+			!GameMaterialLibraryEditors->GetMaterial(Material.c_str())))
+	{
+		return Error("INVALID_GAME_MATERIAL", "The game material must exist in the SDK library");
+	}
+	Tool.PhysicsStopSimulate();
+	Bone.mass = Mass;
+	Bone.center_of_mass = Center;
+	if (!Material.empty())
+	{
+		Bone.game_mtl = Material.c_str();
+	}
+	if (Fields.contains("bind_position_m") || Fields.contains("bind_rotation_degrees"))
+	{
+		Bone.rest_offset = Position;
+		Bone.rest_rotate = Rotation;
+		Object.OnBindTransformChange();
+	}
+	Tool.OnBoneModified();
+	Tool.UpdateProperties();
+	return {{"ok", true}, {"saved", false}, {"bone", ActorBone(Bone, Index)}};
+}
+
+struct MotionFloatField
+{
+	const char* Key;
+	float CSMotion::*Value;
+};
+
+inline constexpr MotionFloatField MotionFloats[] = {
+	{"speed", &CSMotion::fSpeed},
+	{"accrue", &CSMotion::fAccrue},
+	{"falloff", &CSMotion::fFalloff},
+	{"power", &CSMotion::fPower},
+};
+
+struct MotionFlagField
+{
+	const char* Key;
+	u8 Mask;
+};
+
+inline constexpr MotionFlagField MotionFlags[] = {
+	{"stop_at_end", esmStopAtEnd},
+	{"no_mix", esmNoMix},
+	{"sync_part", esmSyncPart},
+};
+
+inline Json PatchActorMotion(CActorTools& Tool, CEditableObject& Object, const Json& Params)
+{
+	const Json IndexValue = Params.value("motion_index", Json());
+	const Json Fields = Params.value("fields", Json::object());
+	if (Tool.ReadOnly() || !Object.m_SMotionRefs.empty() || !Integer(IndexValue, 0, 100000000) ||
+		IndexValue.get<size_t>() >= Object.m_SMotions.size() || !Fields.is_object() || Fields.empty())
+	{
+		return Error("INVALID_ACTOR_MOTION", "Specify a writable local motion and fields from scene_actor_read");
+	}
+	const size_t Index = IndexValue.get<size_t>();
+	CSMotion& Motion = *Object.m_SMotions[Index];
+	for (auto It = Fields.begin(); It != Fields.end(); ++It)
+	{
+		const bool ValidFloat = std::any_of(std::begin(MotionFloats), std::end(MotionFloats), [&](const MotionFloatField& Field)
+		{
+			return It.key() == Field.Key && Number(*It, 0, 10) && (It.key() != "power" || Motion.m_Flags.is(esmFX));
+		});
+		const bool ValidFlag = !Motion.m_Flags.is(esmFX) && std::any_of(std::begin(MotionFlags), std::end(MotionFlags), [&](const MotionFlagField& Field)
+		{
+			return It.key() == Field.Key && It->is_boolean();
+		});
+		if (!ValidFloat && !ValidFlag)
+		{
+			Json Result = Error("INVALID_ACTOR_MOTION_FIELD", "The motion does not support this field or value");
+			Result["field"] = It.key();
+			return Result;
+		}
+	}
+	for (const auto& Field : MotionFloats)
+	{
+		if (Fields.contains(Field.Key))
+		{
+			Motion.*Field.Value = Fields[Field.Key].get<float>();
+		}
+	}
+	for (const auto& Field : MotionFlags)
+	{
+		if (Fields.contains(Field.Key))
+		{
+			Motion.m_Flags.set(Field.Mask, Fields[Field.Key].get<bool>());
+		}
+	}
+	Tool.OnMotionDefsModified();
+	Tool.UpdateProperties();
+	return {{"ok", true}, {"saved", false}, {"motion", ActorMotion(Motion, Index)}};
+}
+
 inline Json SaveActorCopy(CEditableObject& Object, const char* FileName)
 {
 	const auto Destination = std::filesystem::u8path(FileName);
@@ -575,13 +900,25 @@ inline Json SaveActorCopy(CEditableObject& Object, const char* FileName)
 	const auto StageUtf8 = Stage.u8string();
 	const char* StageName = reinterpret_cast<const char*>(StageUtf8.c_str());
 	if (StageUtf8.size() >= sizeof(string_path) || !Data.save_to(StageName) ||
-		std::filesystem::file_size(Stage, Code) != Data.size() || Code ||
-		!std::filesystem::copy_file(Stage, Destination, Code) || Code)
+		std::filesystem::file_size(Stage, Code) != Data.size() || Code || !FS.TryLoad(xr_string(StageName)))
+	{
+		return Error("ACTOR_SAVE_FAILED", "The SDK could not stage the new object file");
+	}
+	{
+		EditableObjectReadOnlyScope ReadOnlyLoad;
+		CEditableObject Reopened(StageName);
+		if (!Reopened.Load(StageName) || Reopened.m_Bones.size() != Object.m_Bones.size() ||
+			Reopened.m_SMotions.size() != Object.m_SMotions.size() || Reopened.m_Surfaces.size() != Object.m_Surfaces.size())
+		{
+			return Error("ACTOR_VERIFY_FAILED", "The staged object could not be reopened with all parts");
+		}
+	}
+	if (!std::filesystem::copy_file(Stage, Destination, Code) || Code)
 	{
 		return Error("ACTOR_SAVE_FAILED", "The SDK could not publish the new object file");
 	}
 	FS.TryLoad(xr_string(FileName));
-	return {{"ok", true}, {"saved", true}, {"path", Text(FileName)}};
+	return {{"ok", true}, {"saved", true}, {"verified", "reopened_native_serialization"}, {"path", Text(FileName)}};
 }
 
 inline Json EditActor(CActorTools& Tool, const Json& Params)
@@ -625,6 +962,14 @@ inline Json EditActor(CActorTools& Tool, const Json& Params)
 	{
 		return PatchActorSurface(Tool, *Object, Params);
 	}
+	if (Operation == "set_bone")
+	{
+		return PatchActorBone(Tool, *Object, Params);
+	}
+	if (Operation == "set_motion")
+	{
+		return PatchActorMotion(Tool, *Object, Params);
+	}
 	if (Operation == "undo" || Operation == "redo")
 	{
 		const bool Changed = Operation == "undo" ? Tool.Undo() : Tool.Redo();
@@ -646,7 +991,7 @@ inline Json EditActor(CActorTools& Tool, const Json& Params)
 		Tool.StopMotion();
 		return {{"ok", true}, {"status", "accepted"}};
 	}
-	return Error("UNKNOWN_ACTOR_ACTION", "Use load, set_surface, save_copy, play, stop, undo or redo");
+	return Error("UNKNOWN_ACTOR_ACTION", "Use a registered Actor Editor action");
 }
 
 struct CompilerFloatField

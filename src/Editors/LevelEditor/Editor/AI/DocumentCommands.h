@@ -406,6 +406,25 @@ struct AiDocumentAccess
 		}
 		const auto Dialog = std::find_if(Form->Dialogs.begin(), Form->Dialogs.end(),
 			[&](const auto& Pair) { return AiText::Utf8(Pair.first.c_str()) == DialogName; });
+		if (Action == "create_dialog")
+		{
+			if (!Token(DialogName) || Dialog != Form->Dialogs.end())
+			{
+				return Error("INVALID_DIALOG", "Specify an unused dialog ID");
+			}
+			auto* RootElement = Form->File.GetRoot()->ToElement();
+			if (RootElement == nullptr || xr_string_view(RootElement->Name()) != "game_dialogs")
+			{
+				return Error("INVALID_DIALOG_FILE", "Expected a game_dialogs XML document");
+			}
+			auto* Element = RootElement->InsertNewChildElement("dialog");
+			Element->SetAttribute("id", DialogName.c_str());
+			Element->InsertNewChildElement("phrase_list");
+			Form->RebuildDialogList();
+			Form->MarkChanged();
+			Form->CommitChange();
+			return {{"ok", true}, {"dialog", DialogName.c_str()}};
+		}
 		if (Dialog == Form->Dialogs.end())
 		{
 			return Error("UNKNOWN_DIALOG", "The dialog does not exist");
@@ -415,19 +434,114 @@ struct AiDocumentAccess
 		{
 			return Error("NO_PHRASES", "The dialog has no phrase list");
 		}
-		if (Action == "set_phrase")
+		if (Action == "set_phrase" || Action == "add_phrase" || Action == "remove_phrase" ||
+			Action == "link" || Action == "unlink" || Action == "move_phrase")
 		{
 			const xr_string PhraseId = String(Params, "phrase");
 			const xr_string Value = String(Params, "value");
-			if (!Token(PhraseId) || !Token(Value))
+			const xr_string TargetId = String(Params, "target");
+			const bool HasText = Action == "set_phrase" || Action == "add_phrase";
+			const bool HasTarget = Action == "link" || Action == "unlink" || Action == "move_phrase";
+			if (!Token(PhraseId) || (HasText && !Token(Value)) || (HasTarget && (!Token(TargetId) || TargetId == PhraseId)) ||
+				(Params.contains("branch") && !Params["branch"].is_boolean()))
 			{
-				return Error("INVALID_PHRASE", "Specify a phrase ID and a string-table ID");
+				return Error("INVALID_PHRASE", "Specify valid phrase IDs and a string-table ID when setting text");
 			}
-			for (auto* Phrase = Root->FirstChildElement("phrase"); Phrase != nullptr; Phrase = Phrase->NextSiblingElement("phrase"))
+
+			auto FindPhrase = [Root](const xr_string& Id)
 			{
-				if (PhraseId == AiText::Utf8(Phrase->Attribute("id")))
+				for (auto* Item = Root->FirstChildElement("phrase"); Item != nullptr; Item = Item->NextSiblingElement("phrase"))
 				{
-					auto* Text = Phrase->FirstChildElement("text");
+					if (Id == AiText::Utf8(Item->Attribute("id")))
+					{
+						return Item;
+					}
+				}
+				return static_cast<tinyxml2::XMLElement*>(nullptr);
+			};
+			auto* Phrase = FindPhrase(PhraseId);
+			auto* Target = HasTarget ? FindPhrase(TargetId) : nullptr;
+			if ((Phrase == nullptr) != (Action == "add_phrase") || (HasTarget && Target == nullptr))
+			{
+				return Error("INVALID_PHRASE", "Use existing phrase IDs for edits and an unused ID for a new phrase");
+			}
+			if (Form->ChangePending)
+			{
+				Form->CommitChange();
+			}
+			const bool IsActiveDialog = Form->LastOpenDialog == Dialog->first;
+			bool RefreshGraph = IsActiveDialog && Action != "set_phrase";
+			bool Changed = true;
+			if (Action == "add_phrase")
+			{
+				Phrase = Root->InsertNewChildElement("phrase");
+				Phrase->SetAttribute("id", PhraseId.c_str());
+				if (Params.value("branch", false))
+				{
+					Phrase->SetAttribute("branch", "1");
+				}
+				Phrase->InsertNewChildElement("text")->SetText(Value.c_str());
+			}
+			else if (Action == "remove_phrase")
+			{
+				for (auto* Item = Root->FirstChildElement("phrase"); Item != nullptr; Item = Item->NextSiblingElement("phrase"))
+				{
+					for (auto* Link = Item->FirstChildElement("next"); Link != nullptr;)
+					{
+						auto* Next = Link->NextSiblingElement("next");
+						if (PhraseId == AiText::Utf8(Link->GetText()))
+						{
+							Item->DeleteChild(Link);
+						}
+						Link = Next;
+					}
+				}
+				Root->DeleteChild(Phrase);
+			}
+			else if (Action == "move_phrase")
+			{
+				auto* Before = Target->PreviousSibling();
+				Changed = Before != Phrase;
+				if (Changed)
+				{
+					if (Before != nullptr)
+					{
+						Root->InsertAfterChild(Before, Phrase);
+					}
+					else
+					{
+						Root->InsertFirstChild(Phrase);
+					}
+				}
+			}
+			else if (HasTarget)
+			{
+				bool Linked = false;
+				for (auto* Link = Phrase->FirstChildElement("next"); Link != nullptr;)
+				{
+					auto* Next = Link->NextSiblingElement("next");
+					if (TargetId == AiText::Utf8(Link->GetText()))
+					{
+						Linked = true;
+						if (Action == "unlink")
+						{
+							Phrase->DeleteChild(Link);
+						}
+					}
+					Link = Next;
+				}
+				Changed = Linked != (Action == "link");
+				if (Action == "link" && !Linked)
+				{
+					Phrase->InsertNewChildElement("next")->SetText(TargetId.c_str());
+				}
+			}
+			else
+			{
+				auto* Text = Phrase->FirstChildElement("text");
+				Changed = Text == nullptr || AiText::Utf8(Text->GetText()) != Value;
+				if (Changed)
+				{
 					if (Text == nullptr)
 					{
 						Text = Phrase->InsertNewChildElement("text");
@@ -442,12 +556,20 @@ struct AiDocumentAccess
 							Form->RefreshProperties = true;
 						}
 					}
-					Form->MarkChanged();
-					Form->CommitChange();
-					return {{"ok", true}, {"dialog", DialogName.c_str()}, {"phrase", PhraseId.c_str()}, {"value", Text->GetText()}};
 				}
 			}
-			return Error("UNKNOWN_PHRASE", "The dialog does not have that phrase");
+			if (Changed)
+			{
+				if (RefreshGraph)
+				{
+					auto* PreviousEditor = ed::GetCurrentEditor();
+					Form->RestoreState(Form->CaptureState());
+					ed::SetCurrentEditor(PreviousEditor);
+				}
+				Form->MarkChanged();
+				Form->CommitChange();
+			}
+			return {{"ok", true}, {"dialog", DialogName.c_str()}, {"phrase", PhraseId.c_str()}, {"value", Value.c_str()}, {"target", TargetId.c_str()}, {"changed", Changed}};
 		}
 		if (Action != "read" && Action != "open" && Action != "reload")
 		{
@@ -461,7 +583,7 @@ struct AiDocumentAccess
 			{
 				Next.push_back(AiText::Utf8(Link->GetText()).c_str());
 			}
-			Results.Add({{"id", AiText::Utf8(Phrase->Attribute("id")).c_str()}, {"text", AiText::Utf8(Text != nullptr ? Text->GetText() : nullptr).c_str()}, {"next", Next}});
+			Results.Add({{"id", AiText::Utf8(Phrase->Attribute("id")).c_str()}, {"text", AiText::Utf8(Text != nullptr ? Text->GetText() : nullptr).c_str()}, {"branch", Phrase->IntAttribute("branch") == 1}, {"next", Next}});
 		}
 		Response["dialog"] = DialogName.c_str();
 		Results.Write(Response, "phrases");
@@ -476,6 +598,82 @@ struct AiDocumentAccess
 		if (Form == nullptr)
 		{
 			return Error("EDITOR_UNAVAILABLE", "Macros editor is unavailable");
+		}
+		auto CanRun = [](const CUIMacroView::SCommand& Command)
+		{
+			return Command.Type == MacroType::eVoid &&
+				(Command.Command == COMMAND_SELECT_ALL || Command.Command == COMMAND_DESELECT_ALL ||
+					Command.Command == COMMAND_INVERT_SELECTION_ALL || Command.Command == COMMAND_SELECT_SNAP_OBJECTS);
+		};
+		if (Action == "validate" || Action == "run")
+		{
+			const auto* Start = Form->Find(Form->StartId);
+			bool Valid = Start != nullptr && !Start->Next.empty();
+			Json Issues = Json::array();
+			if (!Valid)
+			{
+				Issues.push_back({{"code", "START_NOT_LINKED"}, {"node_id", Form->StartId}});
+			}
+			xr_set<int> Visited;
+			xr_vector<int> Pending;
+			if (Valid)
+			{
+				Pending = Start->Next;
+			}
+			while (!Pending.empty() && Visited.size() < 128)
+			{
+				const int Id = Pending.back();
+				Pending.pop_back();
+				if (!Visited.insert(Id).second || Id == Form->StartId)
+				{
+					Issues.push_back({{"code", "REPEATED_NODE"}, {"node_id", Id}});
+					Valid = false;
+					continue;
+				}
+				const auto* Node = Form->Find(Id);
+				const auto* Command = Node != nullptr ? Form->CommandOf(*Node) : nullptr;
+				if (Command == nullptr)
+				{
+					Issues.push_back({{"code", "UNKNOWN_NODE_OR_COMMAND"}, {"node_id", Id}});
+					Valid = false;
+					continue;
+				}
+				if (!CanRun(*Command) || !Node->First.empty() || !Node->Second.empty())
+				{
+					Issues.push_back({{"code", "COMMAND_REQUIRES_MANUAL_RUN"}, {"node_id", Id}, {"command", Command->Name.c_str()}});
+				}
+				Pending.insert(Pending.end(), Node->Next.begin(), Node->Next.end());
+			}
+			if (!Pending.empty())
+			{
+				Issues.push_back({{"code", "TOO_MANY_REACHABLE_NODES"}});
+				Valid = false;
+			}
+			const bool Runnable = Valid && Issues.empty();
+			Json Result = {{"ok", true}, {"valid", Valid}, {"runnable", Runnable}, {"reachable_nodes", Visited.size()}, {"issues", Issues}};
+			if (Action == "validate")
+			{
+				return Result;
+			}
+			if (!Runnable || EContext.UI->ActiveTabIndex != 0)
+			{
+				Result["ok"] = false;
+				Result["code"] = !Runnable ? "MACRO_REQUIRES_MANUAL_RUN" : "OPEN_LEVEL_TAB";
+				Result["message"] = !Runnable ? "Only the validated selection-command graph may run via MCP" : "Open the Level Editor tab before running the selection macro";
+				return Result;
+			}
+			Form->Exec();
+			Result["messages"] = Json::array();
+			for (const auto& Item : Form->Messages)
+			{
+				Result["messages"].push_back({{"node_id", Item.Node}, {"error", Item.IsError}, {"message", AiText::Utf8(Item.Text.c_str()).c_str()}});
+				if (Item.IsError)
+				{
+					Result["ok"] = false;
+					Result["code"] = "MACRO_RUN_FAILED";
+				}
+			}
+			return Result;
 		}
 		if (Action == "save")
 		{
@@ -599,7 +797,7 @@ struct AiDocumentAccess
 		Json Response = {{"ok", true}, {"modified", Form->Modified}, {"commands", Json::array()}};
 		for (const auto& Command : Form->Commands)
 		{
-			Response["commands"].push_back({{"name", Command.Name.c_str()}, {"arguments", static_cast<int>(Command.Type)}, {"integer_argument", Command.IntArg}});
+			Response["commands"].push_back({{"name", Command.Name.c_str()}, {"arguments", static_cast<int>(Command.Type)}, {"integer_argument", Command.IntArg}, {"mcp_runnable", CanRun(Command)}});
 		}
 		const Json Document = Form->Write();
 		for (const auto& Node : Document["nodes"])

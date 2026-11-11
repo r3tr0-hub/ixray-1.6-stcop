@@ -2,6 +2,7 @@
 
 class EParticlesObject: public CCustomObject
 {
+	friend class AiLevelEntityAccess;
 	typedef CCustomObject inherited;
     Fbox				m_BBox;
     shared_str			m_RefName;

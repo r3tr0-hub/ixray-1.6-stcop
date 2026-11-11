@@ -109,6 +109,14 @@ void CParticleTool::RestoreUndoState(const CUndoJournal::State& Parts)
 	shared_str Restored;
 	for (const CUndoJournal::SPart& Part : Parts)
 	{
+		if (!Part.Data)
+		{
+			if (Part.Key == emEffect && FindPE(Part.Name.c_str()))
+			{
+				RImplementation.PSLibrary.Remove(Part.Name.c_str());
+			}
+			continue;
+		}
 		IReader Reader = Part.Open();
 		bool Result = false;
 		switch (EEditMode(Part.Key))
@@ -117,6 +125,16 @@ void CParticleTool::RestoreUndoState(const CUndoJournal::State& Parts)
 			if (PS::CPEDef* Def = FindPE(Part.Name.c_str()))
 			{
 				Result = Def->Restore(Reader);
+			}
+			else if (!FindPG(Part.Name.c_str()) && !FindPAC(Part.Name.c_str()))
+			{
+				PS::CPEDef* RestoredEffect = RImplementation.PSLibrary.AppendPED();
+				RestoredEffect->SetName(Part.Name.c_str());
+				Result = RestoredEffect->Restore(Reader);
+				if (!Result)
+				{
+					RImplementation.PSLibrary.Remove(Part.Name.c_str());
+				}
 			}
 			break;
 		case emGroup:
