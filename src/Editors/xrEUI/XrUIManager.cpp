@@ -61,7 +61,8 @@ void LoadImGuiFontBase(const char* Font, float scale)
 	{
 		if (!FontsStorage.contains(Font))
 		{
-			FontsStorage[Font] = ImGui::GetIO().Fonts->AddFontFromFileTTF(Platform::ANSI_TO_UTF8(FullPath).c_str(), XRay::ImGui::GetEditorSize(XRay::ImGui::EEditorSizes::FontSize), &FontConfig, ImGui::GetIO().Fonts->GetGlyphRangesCyrillic());
+			const xr_string FontPath = IsUTF8(FullPath) ? xr_string(FullPath) : Platform::ANSI_TO_UTF8(FullPath);
+			FontsStorage[Font] = ImGui::GetIO().Fonts->AddFontFromFileTTF(FontPath.c_str(), XRay::ImGui::GetEditorSize(XRay::ImGui::EEditorSizes::FontSize), &FontConfig, ImGui::GetIO().Fonts->GetGlyphRangesCyrillic());
 		}
 
 		ImCurrentFont = Font;
@@ -529,7 +530,8 @@ int XrUIManager::ShowModalMessage(const char* Title, const char* Text, const XrM
 			{
 				ImFontConfig FontConfig = {};
 				FontConfig.OversampleH = 3;
-				Font = IO.Fonts->AddFontFromFileTTF(Platform::ANSI_TO_UTF8(FullPath).c_str(), XRay::ImGui::GetEditorSize(XRay::ImGui::EEditorSizes::FontSize), &FontConfig);
+				const xr_string FontPath = IsUTF8(FullPath) ? xr_string(FullPath) : Platform::ANSI_TO_UTF8(FullPath);
+				Font = IO.Fonts->AddFontFromFileTTF(FontPath.c_str(), XRay::ImGui::GetEditorSize(XRay::ImGui::EEditorSizes::FontSize), &FontConfig, IO.Fonts->GetGlyphRangesCyrillic());
 			}
 		}
 
